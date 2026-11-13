@@ -1,5 +1,6 @@
 // DSO-350 emulator front end. Everything runs in this browser: the machine runs in a Web Worker
 // (core/worker.js); the firmware, the SD-card image and saved states are kept in IndexedDB.
+// UI strings come from i18n.js (t()).
 "use strict";
 const $ = (s) => document.querySelector(s);
 
@@ -11,8 +12,8 @@ const db = new Promise((res, rej) => {
   r.onerror = () => rej(r.error);
 });
 const kvGet = async (k) => { const d = await db; return new Promise((res, rej) => { const q = d.transaction("kv").objectStore("kv").get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); };
-const kvSet = async (k, v) => { const d = await db; return new Promise((res, rej) => { const t = d.transaction("kv", "readwrite"); t.objectStore("kv").put(v, k); t.oncomplete = () => res(); t.onerror = () => rej(t.error); }); };
-const kvDel = async (k) => { const d = await db; return new Promise((res) => { const t = d.transaction("kv", "readwrite"); t.objectStore("kv").delete(k); t.oncomplete = () => res(); }); };
+const kvSet = async (k, v) => { const d = await db; return new Promise((res, rej) => { const t2 = d.transaction("kv", "readwrite"); t2.objectStore("kv").put(v, k); t2.oncomplete = () => res(); t2.onerror = () => rej(t2.error); }); };
+const kvDel = async (k) => { const d = await db; return new Promise((res) => { const t2 = d.transaction("kv", "readwrite"); t2.objectStore("kv").delete(k); t2.oncomplete = () => res(); }); };
 
 // ---------------------------------------------------------------- worker
 const worker = new Worker("core/worker.js", { type: "module" });
@@ -35,7 +36,7 @@ worker.onmessage = (ev) => {
   else if (m.t === "status") { status = m.s; renderStatus(); }
   else if (m.t === "error") { status.error = m.error; renderStatus(); }
 };
-worker.onerror = (e) => { $("#stat").textContent = "erro no emulador: " + e.message; };
+worker.onerror = (e) => { $("#stat").textContent = t("stat.workerError", { err: e.message }); };
 
 // ---------------------------------------------------------------- screen + touch
 const canvas = $("#screen"), ctx2d = canvas.getContext("2d");
@@ -73,17 +74,22 @@ canvas.addEventListener("pointercancel", release);
 // ---------------------------------------------------------------- top bar
 $("#btnRun").onclick = async () => { status = (await call({ t: "control", action: status.paused ? "resume" : "pause" })).status; renderStatus(); };
 $("#btnReset").onclick = async () => { status = (await call({ t: "control", action: "reset" })).status; renderStatus(); };
-$("#btnShot").onclick = () => canvas.toBlob((b) => { const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = "tela-dso350.png"; a.click(); });
+$("#btnShot").onclick = () => canvas.toBlob((b) => { const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = "dso350-screen.png"; a.click(); });
 $("#speed").onchange = (e) => call({ t: "control", action: "speed", value: +e.target.value });
+$("#lang").value = LANG;
+$("#lang").onchange = (e) => setLang(e.target.value);
+document.addEventListener("langchange", () => { chBuilt = false; renderStatus(); loadDir(cwd); listAudio().catch(() => {}); if ($("#pane-dev").classList.contains("active")) loadDev(); });
 
 function fmtInsns(n) { return n >= 1e9 ? (n / 1e9).toFixed(2) + " G" : (n / 1e6).toFixed(0) + " M"; }
 function renderStatus() {
   const s = status;
-  if (!s.loaded) { $("#stat").textContent = "nenhum firmware carregado"; $("#noFw").hidden = false; return; }
-  $("#btnRun").textContent = s.paused ? "▶ Continuar" : "⏸ Pausar";
-  $("#stat").textContent = s.error ? "parou: " + s.error : `${fmtInsns(s.insns || 0)} instr · ${s.mips} M/s · ${s.emuSeconds} s emulados · IRQs ${s.irqs}`;
+  // the side LEDs light while the device is powered (firmware loaded and running)
+  $("#device").classList.toggle("on", !!(s.loaded && s.running && !s.error));
+  if (!s.loaded) { $("#stat").textContent = t("stat.none"); $("#noFw").hidden = false; $("#btnRun").textContent = t("btn.pause"); return; }
+  $("#btnRun").textContent = s.paused ? t("btn.resume") : t("btn.pause");
+  $("#stat").textContent = s.error ? t("stat.stopped", { err: s.error }) : t("stat.run", { insns: fmtInsns(s.insns || 0), mips: s.mips, emu: s.emuSeconds, irqs: s.irqs });
   const fw = s.image || {};
-  $("#fwInfo").innerHTML = `<span>Origem</span><span>${fw.source || "—"}</span><span>Tamanho</span><span>${fw.size || "—"}</span><span>SHA-256</span><span>${fw.sha ? fw.sha + "…" : "—"}</span>`;
+  $("#fwInfo").innerHTML = `<span>${t("sys.source")}</span><span>${esc(fw.source || "—")}</span><span>${t("sys.size")}</span><span>${fw.size || "—"}</span><span>SHA-256</span><span>${fw.sha ? fw.sha + "…" : "—"}</span>`;
   if (s.batteryMv !== undefined && document.activeElement !== $("#batt")) $("#batt").value = s.batteryMv;
   if (s.batteryMv !== undefined) $("#battV").textContent = (s.batteryMv / 1000).toFixed(2) + " V";
   $("#charging").checked = !!s.charging;
@@ -93,25 +99,25 @@ function renderStatus() {
 }
 
 // ---------------------------------------------------------------- tabs
-document.querySelectorAll(".tab").forEach((t) => t.onclick = () => {
-  document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x === t));
-  document.querySelectorAll(".pane").forEach((p) => p.classList.toggle("active", p.id === "pane-" + t.dataset.tab));
-  if (t.dataset.tab === "files") loadDir(cwd);
-  if (t.dataset.tab === "dev") loadDev();
+document.querySelectorAll(".tab").forEach((tb) => tb.onclick = () => {
+  document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x === tb));
+  document.querySelectorAll(".pane").forEach((p) => p.classList.toggle("active", p.id === "pane-" + tb.dataset.tab));
+  if (tb.dataset.tab === "files") loadDir(cwd);
+  if (tb.dataset.tab === "dev") loadDev();
 });
 
 // ---------------------------------------------------------------- firmware (button + drag & drop); kept in IndexedDB
 async function uploadFirmware(file) {
-  $("#stat").textContent = "carregando " + file.name + "…";
+  $("#stat").textContent = t("stat.loading", { name: file.name });
   try {
     const data = await file.arrayBuffer();
     const r = await call({ t: "firmware", data, name: file.name }, [data]);
     await kvSet("firmware", { app: r.app, info: r.info });
     chBuilt = false;
-  } catch (e) { alert("Firmware recusado: " + e.message); }
+  } catch (e) { alert(t("sys.fwRejected", { err: e.message })); }
 }
 document.querySelectorAll(".fwFile").forEach((el) => el.onchange = (e) => e.target.files[0] && uploadFirmware(e.target.files[0]));
-$("#fwForget").onclick = async () => { if (confirm("Esquecer o firmware guardado neste navegador?")) { await kvDel("firmware"); location.reload(); } };
+$("#fwForget").onclick = async () => { if (confirm(t("sys.forgetConfirm"))) { await kvDel("firmware"); location.reload(); } };
 const devEl = $("#device"), drop = $("#drop");
 devEl.addEventListener("dragover", (e) => { e.preventDefault(); drop.hidden = false; });
 devEl.addEventListener("dragleave", () => drop.hidden = true);
@@ -124,23 +130,23 @@ $("#charging").onchange = (e) => call({ t: "battery", charging: e.target.checked
 $("#factory").onchange = async (e) => { await call({ t: "control", action: "factory", value: e.target.checked }); await kvSet("factoryDone", e.target.checked); };
 $("#snapSave").onclick = async () => {
   $("#snapSave").disabled = true;
-  try { const r = await call({ t: "snapshotSave" }); await kvSet("snapshot", r.snapshot); alert("Estado salvo neste navegador."); }
-  catch (e) { alert("Não foi possível salvar: " + e.message); }
+  try { const r = await call({ t: "snapshotSave" }); await kvSet("snapshot", r.snapshot); alert(t("sys.snapSaved")); }
+  catch (e) { alert(t("sys.snapError", { err: e.message })); }
   $("#snapSave").disabled = false;
 };
 $("#snapLoad").onclick = async () => {
   const s = await kvGet("snapshot");
-  if (!s) return alert("Nenhum estado salvo.");
+  if (!s) return alert(t("sys.noSnap"));
   try { await call({ t: "snapshotLoad", snapshot: s }); } catch (e) { alert(e.message); }
 };
 $("#sdDownload").onclick = async () => {
   const r = await call({ t: "getSd" });
   await kvSet("sd", r.sd);
-  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([r.sd])); a.download = "sdcard-dso350.img"; a.click();
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([r.sd])); a.download = "dso350-sdcard.img"; a.click();
 };
 $("#sdImage").onchange = async (e) => {
   const f = e.target.files[0]; if (!f) return;
-  if (!confirm(`Usar "${f.name}" como cartão SD? O cartão atual será substituído.`)) return;
+  if (!confirm(t("sys.sdConfirm", { name: f.name }))) return;
   await kvSet("sd", await f.arrayBuffer());
   location.reload();
 };
@@ -154,20 +160,21 @@ function saveSdSoon() {
 
 // ---------------------------------------------------------------- channels
 let chBuilt = false;
-const WAVES = [["sine", "Senoide"], ["square", "Quadrada"], ["triangle", "Triangular"], ["saw", "Dente de serra"], ["dc", "DC"], ["noise", "Ruído"]];
+const WAVES = ["sine", "square", "triangle", "saw", "dc", "noise"];
+const PROBES = [1, 10, 100];
 function buildChannels(chs) {
   chBuilt = true;
   $("#chForms").innerHTML = chs.map((c, i) => `
     <fieldset class="card ch${i + 1}"><legend>CH${i + 1}</legend>
       <div class="grid2">
-        <span>Ligado</span><label><input type="checkbox" data-ch="${i}" data-k="on" ${c.on ? "checked" : ""}> sinal na ponteira</label>
-        <span>Fonte</span><select data-ch="${i}" data-k="source"><option value="gen">Gerador</option><option value="audio">Áudio do PC</option></select>
-        <span>Forma</span><select data-ch="${i}" data-k="wave">${WAVES.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select>
-        <span>Frequência</span><span><input class="num" type="number" min="0" step="any" data-ch="${i}" data-k="freq" value="${c.freq}"> Hz</span>
-        <span>Amplitude</span><span><input class="num" type="number" min="0" step="any" data-ch="${i}" data-k="vpp" value="${c.vpp}"> Vpp</span>
-        <span>Offset</span><span><input class="num" type="number" step="any" data-ch="${i}" data-k="offset" value="${c.offset}"> V</span>
-        <span>Ponteira</span><span class="seg" data-ch="${i}" data-k="probe">
-          <button data-v="1" class="${c.probe == 1 ? "on" : ""}">1x</button><button data-v="10" class="${c.probe == 10 ? "on" : ""}">10x</button></span>
+        <span>${t("ch.on")}</span><label><input type="checkbox" data-ch="${i}" data-k="on" ${c.on ? "checked" : ""}> ${t("ch.onLabel")}</label>
+        <span>${t("ch.source")}</span><select data-ch="${i}" data-k="source"><option value="gen">${t("ch.gen")}</option><option value="audio">${t("ch.audio")}</option></select>
+        <span>${t("ch.wave")}</span><select data-ch="${i}" data-k="wave">${WAVES.map((v) => `<option value="${v}">${t("wave." + v)}</option>`).join("")}</select>
+        <span>${t("ch.freq")}</span><span><input class="num" type="number" min="0" step="any" data-ch="${i}" data-k="freq" value="${c.freq}"> Hz</span>
+        <span>${t("ch.ampl")}</span><span><input class="num" type="number" min="0" step="any" data-ch="${i}" data-k="vpp" value="${c.vpp}"> Vpp</span>
+        <span>${t("ch.offset")}</span><span><input class="num" type="number" step="any" data-ch="${i}" data-k="offset" value="${c.offset}"> V</span>
+        <span>${t("ch.probe")}</span><span class="seg" data-ch="${i}" data-k="probe">
+          ${PROBES.map((p) => `<button data-v="${p}" class="${c.probe == p ? "on" : ""}">${p}x</button>`).join("")}</span>
       </div></fieldset>`).join("");
   chs.forEach((c, i) => { $(`select[data-ch="${i}"][data-k="source"]`).value = c.source; $(`select[data-ch="${i}"][data-k="wave"]`).value = c.wave; });
   document.querySelectorAll("#chForms [data-k]").forEach((el) => {
@@ -189,7 +196,9 @@ function buildChannels(chs) {
 let audioCtx = null, audioNode = null, audioStream = null, pending = [];
 async function listAudio() {
   const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "audioinput");
-  $("#audioDev").innerHTML = devs.map((d, i) => `<option value="${d.deviceId}">${d.label || "Entrada " + (i + 1)}</option>`).join("") || "<option value=''>nenhuma entrada</option>";
+  const keep = $("#audioDev").value;
+  $("#audioDev").innerHTML = devs.map((d, i) => `<option value="${d.deviceId}">${esc(d.label || t("audio.input", { n: i + 1 }))}</option>`).join("") || `<option value=''>${t("audio.none")}</option>`;
+  if (keep) $("#audioDev").value = keep;
 }
 navigator.mediaDevices?.enumerateDevices && listAudio();
 $("#audioStart").onclick = async () => {
@@ -208,10 +217,10 @@ $("#audioStart").onclick = async () => {
     };
     src.connect(audioNode); audioNode.connect(audioCtx.destination);
     $("#audioStart").disabled = true; $("#audioStop").disabled = false;
-  } catch (e) { alert("Não foi possível abrir a entrada de áudio: " + e.message); }
+  } catch (e) { alert(t("audio.error", { err: e.message })); }
 };
 $("#audioStop").onclick = () => {
-  audioNode?.disconnect(); audioStream?.getTracks().forEach((t) => t.stop()); audioCtx?.close();
+  audioNode?.disconnect(); audioStream?.getTracks().forEach((tr) => tr.stop()); audioCtx?.close();
   audioCtx = audioNode = audioStream = null;
   $("#audioStart").disabled = false; $("#audioStop").disabled = true; $("#audioLevel").style.width = "0";
 };
@@ -236,25 +245,25 @@ async function loadDir(path) {
     $("#fsList").innerHTML = rows.map((e) => `<tr>
       <td class="name" data-dir="${e.dir ? 1 : 0}" data-name="${encodeURIComponent(e.name)}">${e.dir ? "📁" : "📄"} ${esc(e.name)}</td>
       <td class="r">${e.dir ? "" : human(e.size)}</td><td>${e.time}</td>
-      <td class="act"><button data-del="${encodeURIComponent(e.name)}" title="Apagar">✕</button></td></tr>`).join("")
-      || `<tr><td colspan="4" class="note">pasta vazia</td></tr>`;
+      <td class="act"><button data-del="${encodeURIComponent(e.name)}" title="${t("fs.delete")}">✕</button></td></tr>`).join("")
+      || `<tr><td colspan="4" class="note">${t("fs.empty")}</td></tr>`;
     $("#fsNote").classList.remove("warn");
-    $("#fsNote").innerHTML = "Cartão SD emulado (64 MB), guardado neste navegador. Depois de enviar ou apagar arquivos, use <b>Reiniciar</b> para o firmware enxergar a mudança.";
+    $("#fsNote").innerHTML = t("fs.note");
   } catch (e) {
     $("#fsList").innerHTML = "";
-    $("#fsNote").textContent = "Cartão ainda sem sistema de arquivos (" + e.message + "). Deixe o firmware iniciar e formatar o cartão, ou use Formatar.";
+    $("#fsNote").textContent = t("fs.nofs", { err: e.message });
     $("#fsNote").classList.add("warn");
   }
 }
 $("#fsList").onclick = async (ev) => {
-  const t = ev.target;
-  if (t.dataset.del) {
-    const name = decodeURIComponent(t.dataset.del);
-    if (!confirm(`Apagar "${name}" do cartão emulado?`)) return;
+  const tg = ev.target;
+  if (tg.dataset.del) {
+    const name = decodeURIComponent(tg.dataset.del);
+    if (!confirm(t("fs.confirmDelete", { name }))) return;
     try { await call({ t: "fs", op: "delete", path: join(cwd, name) }); } catch (e) { alert(e.message); }
     return loadDir(cwd);
   }
-  const td = t.closest(".name"); if (!td) return;
+  const td = tg.closest(".name"); if (!td) return;
   const name = decodeURIComponent(td.dataset.name);
   if (td.dataset.dir === "1") return loadDir(join(cwd, name));
   const r = await call({ t: "fs", op: "read", path: join(cwd, name) });
@@ -263,12 +272,12 @@ $("#fsList").onclick = async (ev) => {
 $("#fsUp").onclick = () => loadDir(cwd === "/" ? "/" : cwd.replace(/\/[^/]+\/?$/, "") || "/");
 $("#fsRefresh").onclick = () => loadDir(cwd);
 $("#fsMkdir").onclick = async () => {
-  const n = prompt("Nome da nova pasta:"); if (!n) return;
+  const n = prompt(t("fs.newFolder")); if (!n) return;
   try { await call({ t: "fs", op: "mkdir", path: join(cwd, n) }); } catch (e) { alert(e.message); }
   loadDir(cwd);
 };
 $("#fsFormat").onclick = async () => {
-  if (!confirm("Formatar o cartão SD emulado em FAT32? Todos os arquivos do cartão serão apagados.")) return;
+  if (!confirm(t("fs.confirmFormat"))) return;
   try { await call({ t: "fs", op: "format" }); } catch (e) { alert(e.message); }
   loadDir("/");
 };
@@ -285,14 +294,14 @@ async function loadDev() {
   try {
     const d = (await call({ t: "dev" })).info, s = status;
     if (!d.regs) return;
-    $("#devExec").innerHTML = `<span>PC</span><span>${esc(s.pc)}</span><span>Instruções</span><span>${fmtInsns(s.insns || 0)}</span><span>Velocidade</span><span>${s.mips} M/s</span>`
-      + `<span>CPSR</span><span>${d.cpsr}</span><span>Registradores</span><span>${d.regs.map((v, i) => `r${i}=${v}`).join(" ")}</span>`
-      + `<span>Flash/SD</span><span>${d.flashReads} leituras · ${d.sdCommands} comandos</span><span>Toque</span><span>${s.touchReads} leituras</span>`;
+    $("#devExec").innerHTML = `<span>PC</span><span>${esc(s.pc)}</span><span>${t("dev.insns")}</span><span>${fmtInsns(s.insns || 0)}</span><span>${t("dev.speed")}</span><span>${s.mips} M/s</span>`
+      + `<span>CPSR</span><span>${d.cpsr}</span><span>${t("dev.regs")}</span><span>${d.regs.map((v, i) => `r${i}=${v}`).join(" ")}</span>`
+      + `<span>${t("dev.flashsd")}</span><span>${t("dev.flashsdVal", { f: d.flashReads, s: d.sdCommands })}</span><span>${t("dev.touch")}</span><span>${t("dev.touchVal", { n: s.touchReads })}</span>`;
     $("#devIrq").innerHTML = Object.entries(d.gic).map(([k, v]) => `<span>IRQ ${k}${({ 50: " (timer 0)", 116: " (CSI)", 103: " (USB)" })[k] || ""}</span><span>${v}</span>`).join("") || "<span>—</span><span></span>";
     $("#devFpga").innerHTML = Object.entries(d.fpgaReads).map(([k, v]) => `<span>${k}: ${v}</span>`).join("");
     $("#devMmio").innerHTML = d.unmodelled.map((u) => `<tr><td>${u.op}${u.size}</td><td class="mono">${u.addr}</td><td class="r">${u.count}</td><td class="mono">${esc(u.first)}</td></tr>`).join("");
     $("#devHot").innerHTML = d.hot.map((h) => `${h.samples} · ${esc(h.where)}`).join("<br>");
-    $("#devUart").textContent = d.uart || "(sem saída)";
+    $("#devUart").textContent = d.uart || t("dev.noUart");
   } catch (e) { /* busy */ }
 }
 setInterval(() => { if ($("#pane-dev").classList.contains("active") && $("#devAuto").checked) loadDev(); }, 1500);
@@ -307,6 +316,7 @@ $("#peekGo").onclick = async () => {
 };
 
 // ---------------------------------------------------------------- start-up
+applyI18n();
 (async () => {
   let symbols = null;
   try { const r = await fetch("data/symbols.json"); if (r.ok) symbols = await r.json(); } catch (_) { /* optional */ }

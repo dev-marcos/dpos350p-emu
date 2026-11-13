@@ -91,3 +91,17 @@ h4 { margin: 14px 0 6px; font-size: 13px; color: var(--muted); font-weight: 600;
 .nofw .note { max-width: 420px; }
 canvas.screen { background: #000; }
 #speed { padding: 4px 6px; }
+
+/* side LEDs: a soft blue glow from the middle of each side while the device is on */
+.device .led { position: absolute; top: 22%; height: 56%; width: 9%; pointer-events: none; opacity: 0;
+  transition: opacity 1.2s ease; filter: blur(10px); mix-blend-mode: screen; z-index: 0;
+  background: radial-gradient(ellipse 50% 50% at 50% 50%, rgba(70, 160, 255, .75) 0%, rgba(40, 120, 255, .30) 40%, rgba(30, 100, 255, 0) 72%); }
+.device .led.left { left: -4.2%; }
+.device .led.right { right: -4.2%; }
+.device .frame, .device .screen { position: relative; z-index: 1; }
+.device .screen { position: absolute; }
+.device.on .led { opacity: 1; animation: ledBreath 6s ease-in-out infinite; }
+@keyframes ledBreath { 0%, 100% { opacity: .85; } 50% { opacity: 1; } }
+#lang { padding: 4px 6px; }
+.device .nofw { z-index: 2; }
+.device .drop { z-index: 3; }

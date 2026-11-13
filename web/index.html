@@ -1,21 +1,22 @@
 <!doctype html>
-<html lang="pt-BR">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Emulador DSO-350</title>
+<title>DSO-350 Emulator</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header class="topbar">
-  <div class="brand">Emulador <b>DSO-350</b> <span class="muted">firmware 2025-06-19 · roda no navegador</span></div>
+  <div class="brand"><span data-i18n="title">DSO-350 Emulator</span> <span class="muted" data-i18n="brand.sub">firmware 2025-06-19 · runs in your browser</span></div>
   <div class="controls">
-    <button id="btnRun" title="Pausar / continuar">⏸ Pausar</button>
-    <button id="btnReset" title="Reiniciar o aparelho (liga de novo)">⟲ Reiniciar</button>
-    <button id="btnShot" title="Salvar a tela como PNG">⤓ Tela</button>
-    <select id="speed" title="Velocidade">
-      <option value="0">Máxima</option><option value="1">Tempo real</option><option value="0.5">0,5×</option><option value="2">2×</option>
+    <button id="btnRun" data-i18n-title="tip.pause">⏸ Pause</button>
+    <button id="btnReset" data-i18n="btn.reset" data-i18n-title="tip.reset">⟲ Reset</button>
+    <button id="btnShot" data-i18n="btn.shot" data-i18n-title="tip.shot">⤓ Screen</button>
+    <select id="speed" data-i18n-title="tip.speed">
+      <option value="0" data-i18n="speed.max">Maximum</option><option value="1" data-i18n="speed.real">Real time</option><option value="0.5">0.5×</option><option value="2">2×</option>
     </select>
+    <select id="lang" data-i18n-title="tip.lang"><option value="en">English</option><option value="pt">Português</option></select>
     <span id="stat" class="stat">—</span>
   </div>
 </header>
@@ -23,104 +24,107 @@
 <main class="layout">
   <section class="stage">
     <div class="device" id="device">
+      <div class="led left" aria-hidden="true"></div>
+      <div class="led right" aria-hidden="true"></div>
       <img class="frame" src="frame.svg" alt="" draggable="false">
-      <canvas class="screen" id="screen" width="1022" height="600" aria-label="tela do emulador"></canvas>
+      <canvas class="screen" id="screen" width="1022" height="600" aria-label="emulated screen"></canvas>
       <div class="nofw" id="noFw" hidden>
-        <p><b>Carregue o firmware</b></p>
-        <p>Arquivo de atualização do DPOS350P (<code>.iso</code>) ou <code>app.bin</code>.</p>
-        <label class="btn">Escolher arquivo<input type="file" class="fwFile" accept=".iso,.bin" hidden></label>
-        <p class="note">O arquivo fica só neste navegador. Nada é enviado para servidor nenhum.</p>
+        <p><b data-i18n="nofw.title">Load the firmware</b></p>
+        <p data-i18n-html="nofw.text"></p>
+        <label class="btn"><span data-i18n="nofw.choose">Choose file</span><input type="file" class="fwFile" accept=".iso,.bin" hidden></label>
+        <p class="note" data-i18n="nofw.note"></p>
       </div>
-      <div class="drop" id="drop" hidden>Solte aqui o firmware (.iso ou app.bin)</div>
+      <div class="drop" id="drop" hidden data-i18n="drop"></div>
     </div>
-    <p class="hint">Clique e arraste na tela para tocar. Arraste um arquivo de firmware sobre o aparelho para carregá-lo.</p>
+    <p class="hint" data-i18n="hint"></p>
   </section>
 
   <aside class="panel">
     <nav class="tabs" role="tablist">
-      <button class="tab active" data-tab="files">Arquivos</button>
-      <button class="tab" data-tab="channels">Canais</button>
-      <button class="tab" data-tab="system">Sistema</button>
-      <button class="tab" data-tab="dev">Dev</button>
+      <button class="tab active" data-tab="files" data-i18n="tab.files">Files</button>
+      <button class="tab" data-tab="channels" data-i18n="tab.channels">Channels</button>
+      <button class="tab" data-tab="system" data-i18n="tab.system">System</button>
+      <button class="tab" data-tab="dev" data-i18n="tab.dev">Dev</button>
     </nav>
 
-    <!-- ARQUIVOS (cartão SD) -->
+    <!-- FILES (SD card) -->
     <div class="pane active" id="pane-files">
       <div class="row between">
         <div class="crumbs" id="crumbs">/</div>
         <div class="row gap">
-          <button id="fsUp" title="Pasta acima">↑</button>
-          <button id="fsRefresh" title="Atualizar">⟳</button>
-          <button id="fsMkdir" title="Nova pasta">＋📁</button>
-          <button id="fsFormat" title="Formatar o cartão emulado (FAT32)">Formatar</button>
-          <label class="btn" title="Enviar arquivo para o cartão">⤒ Enviar<input type="file" id="fsUpload" multiple hidden></label>
+          <button id="fsUp" data-i18n-title="fs.up">↑</button>
+          <button id="fsRefresh" data-i18n-title="fs.refresh">⟳</button>
+          <button id="fsMkdir" data-i18n-title="fs.mkdir">＋📁</button>
+          <button id="fsFormat" data-i18n="fs.format" data-i18n-title="fs.formatTip">Format</button>
+          <label class="btn" data-i18n-title="fs.uploadTip"><span data-i18n="fs.upload">⤒ Upload</span><input type="file" id="fsUpload" multiple hidden></label>
         </div>
       </div>
-      <table class="files"><thead><tr><th>Nome</th><th class="r">Tamanho</th><th>Data</th><th></th></tr></thead>
+      <table class="files"><thead><tr><th data-i18n="fs.name">Name</th><th class="r" data-i18n="fs.size">Size</th><th data-i18n="fs.date">Date</th><th></th></tr></thead>
         <tbody id="fsList"></tbody></table>
-      <p class="note" id="fsNote">Cartão SD emulado (64 MB), guardado neste navegador.</p>
+      <p class="note" id="fsNote"></p>
     </div>
 
-    <!-- CANAIS -->
+    <!-- CHANNELS -->
     <div class="pane" id="pane-channels">
       <div id="chForms"></div>
       <fieldset class="card">
-        <legend>Entrada de áudio do computador</legend>
+        <legend data-i18n="audio.legend">Computer audio input</legend>
         <div class="row gap wrap">
-          <select id="audioDev"><option value="">(liberar o microfone para listar)</option></select>
-          <button id="audioStart">▶ Capturar</button>
-          <button id="audioStop" disabled>■ Parar</button>
+          <select id="audioDev"><option value="" data-i18n="audio.allow"></option></select>
+          <button id="audioStart" data-i18n="audio.start">▶ Capture</button>
+          <button id="audioStop" disabled data-i18n="audio.stop">■ Stop</button>
         </div>
-        <label class="row gap">Fundo de escala = <input id="audioVolts" type="number" value="1" step="0.1" min="0.01" class="num"> V</label>
-        <p class="note">Escolha "Áudio do PC" como fonte em um canal para injetar o sinal capturado (microfone, entrada de linha ou cabo virtual).</p>
+        <label class="row gap"><span data-i18n="audio.fullscale">Full scale =</span> <input id="audioVolts" type="number" value="1" step="0.1" min="0.01" class="num"> V</label>
+        <p class="note" data-i18n="audio.note"></p>
         <div class="meter"><div id="audioLevel"></div></div>
       </fieldset>
-      <p class="note warn">A conversão volts → código do ADC ainda é uma aproximação, e o traço só aparece quando a calibração do aparelho estiver modelada. A forma, a frequência e as proporções valem; a escala absoluta ainda não.</p>
+      <p class="note warn" data-i18n="ch.warn"></p>
     </div>
 
-    <!-- SISTEMA -->
+    <!-- SYSTEM -->
     <div class="pane" id="pane-system">
       <fieldset class="card">
-        <legend>Firmware</legend>
+        <legend data-i18n="sys.fw">Firmware</legend>
         <div id="fwInfo" class="kv"></div>
-        <label class="btn wide">Carregar firmware (.iso ou app.bin)<input type="file" class="fwFile" accept=".iso,.bin" hidden></label>
-        <button id="fwForget" class="wide">Esquecer o firmware guardado</button>
-        <p class="note">O arquivo fica só neste navegador (IndexedDB). Nada é enviado para fora.</p>
+        <label class="btn wide"><span data-i18n="sys.load">Load firmware (.iso or app.bin)</span><input type="file" class="fwFile" accept=".iso,.bin" hidden></label>
+        <button id="fwForget" class="wide" data-i18n="sys.forget">Forget the stored firmware</button>
+        <p class="note" data-i18n="sys.fwNote"></p>
       </fieldset>
       <fieldset class="card">
-        <legend>Bateria</legend>
-        <label class="row gap">Tensão <input type="range" id="batt" min="3300" max="4300" step="10"> <span id="battV" class="mono"></span></label>
-        <label class="row gap"><input type="checkbox" id="charging"> Carregando</label>
+        <legend data-i18n="sys.battery">Battery</legend>
+        <label class="row gap"><span data-i18n="sys.voltage">Voltage</span> <input type="range" id="batt" min="3300" max="4300" step="10"> <span id="battV" class="mono"></span></label>
+        <label class="row gap"><input type="checkbox" id="charging"> <span data-i18n="sys.charging">Charging</span></label>
       </fieldset>
       <fieldset class="card">
-        <legend>Inicialização</legend>
-        <label class="row gap"><input type="checkbox" id="factory" checked> Processo de fábrica concluído (pula o autoteste e o modo "insira o testador")</label>
-        <p class="note">Vale no próximo <b>Reiniciar</b>.</p>
+        <legend data-i18n="sys.boot">Start-up</legend>
+        <label class="row gap"><input type="checkbox" id="factory" checked> <span data-i18n="sys.factory"></span></label>
+        <p class="note" data-i18n-html="sys.nextReset"></p>
       </fieldset>
       <fieldset class="card">
-        <legend>Estado e cartão</legend>
-        <div class="row gap wrap"><button id="snapSave">Salvar estado</button><button id="snapLoad">Restaurar estado</button></div>
-        <div class="row gap wrap" style="margin-top:8px"><button id="sdDownload">Baixar imagem do cartão</button>
-          <label class="btn">Usar imagem de cartão…<input type="file" id="sdImage" accept=".img,.bin" hidden></label></div>
+        <legend data-i18n="sys.state">State and card</legend>
+        <div class="row gap wrap"><button id="snapSave" data-i18n="sys.snapSave">Save state</button><button id="snapLoad" data-i18n="sys.snapLoad">Restore state</button></div>
+        <div class="row gap wrap" style="margin-top:8px"><button id="sdDownload" data-i18n="sys.sdDownload">Download card image</button>
+          <label class="btn"><span data-i18n="sys.sdUse">Use card image…</span><input type="file" id="sdImage" accept=".img,.bin" hidden></label></div>
       </fieldset>
     </div>
 
     <!-- DEV -->
     <div class="pane" id="pane-dev">
-      <div class="row gap"><label class="row gap"><input type="checkbox" id="devAuto" checked> Atualizar</label></div>
-      <h4>Execução</h4><div id="devExec" class="kv"></div>
-      <h4>Memória</h4>
-      <div class="row gap"><input id="peekAddr" type="text" value="42E68AE0" class="num mono" title="endereço (hex)"><input id="peekLen" type="number" value="64" class="num"><button id="peekGo">Ler</button></div>
+      <div class="row gap"><label class="row gap"><input type="checkbox" id="devAuto" checked> <span data-i18n="dev.auto">Auto refresh</span></label></div>
+      <h4 data-i18n="dev.exec">Execution</h4><div id="devExec" class="kv"></div>
+      <h4 data-i18n="dev.memory">Memory</h4>
+      <div class="row gap"><input id="peekAddr" type="text" value="42E68AE0" class="num mono" title="address (hex)"><input id="peekLen" type="number" value="64" class="num"><button id="peekGo" data-i18n="dev.read">Read</button></div>
       <pre id="peekOut" class="log mono"></pre>
-      <h4>Interrupções</h4><div id="devIrq" class="kv"></div>
-      <h4>FPGA (leituras por seletor)</h4><div id="devFpga" class="chips"></div>
-      <h4>Periféricos sem modelo</h4>
-      <table class="files small"><thead><tr><th>Op</th><th>Endereço</th><th class="r">Vezes</th><th>Primeira função</th></tr></thead><tbody id="devMmio"></tbody></table>
-      <h4>Onde o tempo vai</h4><div id="devHot" class="mono small"></div>
-      <h4>UART</h4><pre id="devUart" class="log"></pre>
+      <h4 data-i18n="dev.irq">Interrupts</h4><div id="devIrq" class="kv"></div>
+      <h4 data-i18n="dev.fpga">FPGA (reads per selector)</h4><div id="devFpga" class="chips"></div>
+      <h4 data-i18n="dev.mmio">Unmodelled peripherals</h4>
+      <table class="files small"><thead><tr><th data-i18n="dev.op">Op</th><th data-i18n="dev.addr">Address</th><th class="r" data-i18n="dev.count">Count</th><th data-i18n="dev.first">First function</th></tr></thead><tbody id="devMmio"></tbody></table>
+      <h4 data-i18n="dev.hot">Where the time goes</h4><div id="devHot" class="mono small"></div>
+      <h4 data-i18n="dev.uart">UART</h4><pre id="devUart" class="log"></pre>
     </div>
   </aside>
 </main>
+<script src="i18n.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

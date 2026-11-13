@@ -4,11 +4,14 @@
 import fs from 'node:fs';
 import readline from 'node:readline';
 import { Cpu } from '../web/core/cpu.js';
+import { compileBlock } from '../web/core/jit.js';
 
 const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf(k); if (i < 0) return d; const v = args[i + 1]; args.splice(i, 2); return v; };
 const maxFail = +opt('--max-fail', 40);
 const filter = opt('--filter', '');
+// --jit: run each ARM case as a one-instruction compiled block (web/core/jit.js) instead of the interpreter
+const useJit = args.includes('--jit'); if (useJit) args.splice(args.indexOf('--jit'), 1);
 const casesPath = args[0] || 'build/cpu_cases.jsonl';
 const imagePath = args[1] || 'build/extract/app.bin';
 
@@ -50,7 +53,8 @@ for await (const line of rl) {
   cpu.pc = k.addr; cpu.T = k.thumb ? 1 : 0;
   const diffs = [];
   try {
-    cpu.run(1);
+    if (useJit && !k.thumb) { const b = compileBlock(cpu, k.addr, 1); if (b) { b(cpu); } else cpu.run(1); }
+    else cpu.run(1);
   } catch (e) {
     diffs.push(`exception: ${e.message}`);
     faults++;

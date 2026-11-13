@@ -23,12 +23,13 @@ node tests/serve.mjs            # then open http://localhost:8351
 |---|---|
 | ARMv7-A CPU: ARM, the Thumb-2 subset the firmware uses, VFPv3, CP15 | `web/core/cpu.js` |
 | Peripherals: GIC, timers, SPI flash, SD/MMC + IDMAC, FPGA bus, CSI capture, analog front end, GT911 touch, LRADC battery | `web/core/board.js` |
+| Basic-block compiler for ARM state (inline JS per block, interpreter closures for the rest) | `web/core/jit.js` |
 | Memory map, fast paths, boot loop, framebuffer | `web/core/machine.js` |
 | Runs the machine off the UI thread; snapshots; file manager | `web/core/worker.js` |
 | FAT12/16/32 read/write, FAT32 format | `web/core/fat.js` |
 | `.iso` container → `app.bin` | `web/core/iso.js` |
 | Synthetic channel calibration (SPI flash 0x1FB000) and the conversion it feeds | `web/core/calibration.js` |
-| Page: device frame, screen, tabs Arquivos / Canais / Sistema / Dev | `web/index.html`, `web/app.js`, `web/style.css`, `web/frame.svg` |
+| Page: device frame with side LEDs, screen, tabs Files / Channels / System / Dev; English or Portuguese | `web/index.html`, `web/app.js`, `web/i18n.js`, `web/style.css`, `web/frame.svg` |
 
 The firmware's MMU tables map every address to itself, so the core uses flat memory.
 
@@ -47,6 +48,13 @@ node tools/sim/tests/boot.mjs --insns 1700M --ch1 freq=20000,vpp=1   # headless 
 ```
 
 IT instructions are left out of the comparison: Unicorn runs a whole IT block as one step.
+
+The block compiler is checked two ways. `node tools/sim/tests/cpu_test.mjs --jit` runs every ARM case
+as a one-instruction compiled block. `node tools/sim/tests/jit_equiv.mjs` runs the machine with and
+without blocks side by side and compares registers, VFP state and a hash of all memory at each
+checkpoint. Both were identical through 2.4 G instructions. Speed: about 240 M instructions per second
+in Node with blocks, against about 45 without; in the browser about 180 against 45. A tap on the
+screen now takes effect in about 0.2 s.
 
 ## Python reference (Unicorn)
 

@@ -6,6 +6,8 @@
 // code area drop the cached decodes. r[15] holds the architectural PC value (address + 8 in ARM,
 // + 4 in Thumb) while an instruction runs, so decoders read PC like any register.
 
+import { compileBlock } from './jit.js';
+
 const DRAM = 0x40000000;
 const CODE_LIMIT = 0x00200000;          // decode cache covers the first 2 MiB of DRAM
 const LOW_LIMIT = 0x00010000;           // and the low 64 KiB (exception vectors copied to 0)
@@ -53,6 +55,11 @@ export class Cpu {
     this.prehooks = new Map();                              // address -> function(cpu) (runs before the instruction)
     this.insns = 0;
     this.exclusive = false;
+    // block compiler (jit.js): compiled blocks per start word, execution counts, words covered by blocks
+    this.jit = true;
+    this.blocks = new Array(CODE_LIMIT >> 2).fill(undefined);
+    this.heat = new Uint16Array(CODE_LIMIT >> 2);
+    this.codeFlag = new Uint8Array(CODE_LIMIT >> 2);
   }
 
   // ------------------------------------------------------------------ CPSR / modes
@@ -144,7 +151,7 @@ export class Cpu {
     const o = (a - DRAM) >>> 0;
     if (o < this.dramSize && !(a & 3)) {
       this.d32[o >> 2] = v;
-      if (o < CODE_LIMIT) { this.acache[o >> 2] = undefined; this.tcache[o >> 1] = undefined; this.tcache[(o >> 1) + 1] = undefined; }
+      if (o < CODE_LIMIT) { this.acache[o >> 2] = undefined; this.tcache[o >> 1] = undefined; this.tcache[(o >> 1) + 1] = undefined; if (this.codeFlag[o >> 2]) this.flushBlocks(); }
       return;
     }
     this.stSlow(a >>> 0, 4, v);
@@ -153,7 +160,7 @@ export class Cpu {
     const o = (a - DRAM) >>> 0;
     if (o < this.dramSize && !(a & 1)) {
       this.d16[o >> 1] = v;
-      if (o < CODE_LIMIT) { this.acache[o >> 2] = undefined; this.tcache[o >> 1] = undefined; }
+      if (o < CODE_LIMIT) { this.acache[o >> 2] = undefined; this.tcache[o >> 1] = undefined; if (this.codeFlag[o >> 2]) this.flushBlocks(); }
       return;
     }
     this.stSlow(a >>> 0, 2, v & 0xFFFF);
@@ -162,7 +169,7 @@ export class Cpu {
     const o = (a - DRAM) >>> 0;
     if (o < this.dramSize) {
       this.dram[o] = v;
-      if (o < CODE_LIMIT) { this.acache[o >> 2] = undefined; this.tcache[o >> 1] = undefined; }
+      if (o < CODE_LIMIT) { this.acache[o >> 2] = undefined; this.tcache[o >> 1] = undefined; if (this.codeFlag[o >> 2]) this.flushBlocks(); }
       return;
     }
     this.stSlow(a >>> 0, 1, v & 0xFF);
@@ -179,10 +186,12 @@ export class Cpu {
   // invalidate decodes after a bulk write (DMA, loader)
   invalidate(a, n) {
     const o = (a - DRAM) >>> 0;
-    if (o < CODE_LIMIT) { const e = Math.min(CODE_LIMIT, o + n); for (let x = o & ~3; x < e; x += 2) { this.acache[x >> 2] = undefined; this.tcache[x >> 1] = undefined; } }
+    if (o < CODE_LIMIT) { const e = Math.min(CODE_LIMIT, o + n); let hit = false; for (let x = o & ~3; x < e; x += 2) { this.acache[x >> 2] = undefined; this.tcache[x >> 1] = undefined; if (this.codeFlag[x >> 2]) hit = true; } if (hit) this.flushBlocks(); }
     if (a < LOW_LIMIT) { const e = Math.min(LOW_LIMIT, a + n); for (let x = a & ~3; x < e; x += 2) { this.lacache[x >> 2] = undefined; this.ltcache[x >> 1] = undefined; } }
   }
-  flushDecodes() { this.acache.fill(undefined); this.tcache.fill(undefined); this.lacache.fill(undefined); this.ltcache.fill(undefined); }
+  flushDecodes() { this.acache.fill(undefined); this.tcache.fill(undefined); this.lacache.fill(undefined); this.ltcache.fill(undefined); this.flushBlocks(); }
+  flushBlocks() { this.blocks.fill(undefined); this.codeFlag.fill(0); this.heat.fill(0); }
+  markBlock(b) { const o = (b.start - DRAM) >>> 2; for (let k = 0; k < b.len; k++) this.codeFlag[o + k] = 1; }
 
   // ------------------------------------------------------------------ PC writes
   bxWrite(v) {                         // interworking branch
@@ -229,6 +238,18 @@ export class Cpu {
       } else {
         let f;
         const o = (pc - DRAM) >>> 0;
+        if (o < CODE_LIMIT && this.jit) {
+          let b = this.blocks[o >> 2];
+          if (b === undefined && ++this.heat[o >> 2] > 16) {
+            b = this.blocks[o >> 2] = compileBlock(this, pc);
+            if (b) this.markBlock(b);
+          }
+          if (b && b.len <= n - i) {
+            i += b(this);
+            if (this.stop) break;
+            continue;
+          }
+        }
         if (o < CODE_LIMIT) { f = this.acache[o >> 2]; if (f === undefined) f = this.acache[o >> 2] = this.decodeA(pc); }
         else if (pc < LOW_LIMIT) { f = this.lacache[pc >> 2]; if (f === undefined) f = this.lacache[pc >> 2] = this.decodeA(pc); }
         else f = this.decodeA(pc);
