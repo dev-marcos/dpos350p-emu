@@ -105,3 +105,13 @@ canvas.screen { background: #000; }
 #lang { padding: 4px 6px; }
 .device .nofw { z-index: 2; }
 .device .drop { z-index: 3; }
+
+/* top bar: brand left, status centred, buttons right; the status text changes width without moving the buttons */
+.topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 12px; }
+.topbar .brand { justify-self: start; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.topbar .stat { justify-self: center; text-align: center; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.topbar .controls { justify-self: end; flex-wrap: nowrap; }
+@media (max-width: 1100px) {
+  .topbar { grid-template-columns: minmax(0, 1fr) auto; }
+  .topbar .stat { grid-column: 1 / -1; grid-row: 2; }
+}
