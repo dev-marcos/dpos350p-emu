@@ -115,3 +115,7 @@ canvas.screen { background: #000; }
   .topbar { grid-template-columns: minmax(0, 1fr) auto; }
   .topbar .stat { grid-column: 1 / -1; grid-row: 2; }
 }
+
+/* channel-style tags with the scope UI colours (GEN = #f83088 with black text, as drawn by the firmware) */
+.tag { display: inline-block; padding: 0 6px; margin-right: 8px; border-radius: 3px; font-weight: 600; color: #000; line-height: 1.5; }
+.tag.gen { background: #f83088; }
