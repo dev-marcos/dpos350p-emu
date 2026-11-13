@@ -3,6 +3,7 @@
 import { Machine, symbolTable } from './machine.js';
 import { Fat, mkfsFat32 } from './fat.js';
 import { appFromUpload } from './iso.js';
+import { readGen } from './genwave.js';
 
 const INSNS_PER_SECOND = 48e6;                  // emulated time: 0.5 OSC tick per instruction (board.ticksPerInsn)
 let m = null, app = null, appInfo = null;
@@ -11,7 +12,7 @@ let symbols = null;
 let running = false, paused = false;
 let opts = { factoryDone: true, bypassCalibration: false };
 let speed = 0;                                  // 0 = as fast as possible, else multiple of real time
-let lastFrame = 0, lastStatus = 0, mips = 0, tMips = 0, iMips = 0;
+let lastFrame = 0, lastStatus = 0, mips = 0, tMips = 0, iMips = 0, lastGen = 0, genKey = '';
 let paceT0 = 0, paceI0 = 0;
 let sdDirty = false;
 const keep = { channels: null, battery: 4100, charging: false, audioVolts: 1 };
@@ -52,6 +53,7 @@ function step() {
   const now = performance.now();
   if (m && now - lastFrame >= 66) { lastFrame = now; sendFrame(); }
   if (now - lastStatus >= 500) { lastStatus = now; sendStatus(now); }
+  if (m && now - lastGen >= 50) { lastGen = now; const g = readGen(m); const key = JSON.stringify(g); if (key !== genKey) { genKey = key; post({ t: 'gen', g }); } }
   const idle = !m || !running || paused || m.error;
   if (idle || (speed > 0 && m.cpu.insns >= paceI0 + (now - paceT0) / 1000 * INSNS_PER_SECOND * speed)) setTimeout(step, idle ? 50 : 4);
   else yieldNext();
@@ -79,7 +81,7 @@ function status() {
     loaded: true, running: running && !paused, paused, error: m.error, insns: m.cpu.insns, mips: +mips.toFixed(1),
     irqs: m.irqs, csiFrames: d.csi.frames, pc: m.sym(m.cpu.pc), image: appInfo, batteryMv: d.batteryMv, charging: d.charging,
     factoryDone: opts.factoryDone, channels: d.frontend.ch, audioVolts: d.frontend.audioVolts, touchReads: d.touch.reads,
-    speed, emuSeconds: +(m.cpu.insns / INSNS_PER_SECOND).toFixed(1), sdDirty,
+    speed, emuSeconds: +(m.cpu.insns / INSNS_PER_SECOND).toFixed(1), sdDirty, gen: readGen(m),
   };
 }
 

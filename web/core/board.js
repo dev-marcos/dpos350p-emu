@@ -2,6 +2,7 @@
 // what the stock firmware expects from them was read from its code (docs/DRIVERS.md in the decomp repo).
 
 import { calibrationBlob, CAL_STORAGE, CAL_OBJECT } from './calibration.js';
+import { readGen, genVolts } from './genwave.js';
 
 export const CCU = 0x01C20000;
 export const TMR = 0x01C20C00;
@@ -474,6 +475,7 @@ export class FrontEnd {
   // t: seconds from the trigger point
   volts(p, t, j) {
     if (!p.on) return 0;
+    if (p.source === 'device') return genVolts(this.gen, t);        // probe on the scope's own generator output
     if (p.source === 'audio' && this.audio.length) { const k = this.audio.length - 1 - Math.round((this.halfSpan - t) * this.audioRate); return (k >= 0 && k < this.audio.length ? this.audio[k] : 0) * this.audioVolts; }
     const ph = (((t * p.freq) % 1) + 1) % 1;
     let s;
@@ -492,6 +494,7 @@ export class FrontEnd {
     const c = ((on[0] && on[1] && slot >= 4) || (on[1] && !on[0])) ? 1 : 0;
     const p = this.ch[c];
     const out = this.out;
+    if (p.source === 'device') this.gen = readGen(this.m);
     const vidx = this.u(c ? 0x105 : 0x41, 1);
     const gain = this.u((c ? 0x214 : 0x1C4) + 4 * vidx, 4);
     const A = this.m.r32(CAL_OBJECT + 0x10 + 4 * slot) | 0, B = this.m.r32(CAL_OBJECT + 0x30 + 4 * slot) | 0;
@@ -518,11 +521,13 @@ export class FrontEnd {
     const record = Math.min((n - 6) * lanes, (10 * tdiv / dt) + 1604 * lanes / this.LANES);
     const mid = record / 2;
     this.halfSpan = mid * dt;
-    const phase0 = p.wave === 'sine' ? 0 : p.wave === 'saw' ? 0.5 : p.wave === 'triangle' ? 0.75 : 0;
+    const phase0 = p.source === 'device' ? (this.gen.wave === 2 ? 0.25 : this.gen.wave === 3 || this.gen.wave === 4 ? 0.5 : 0)
+      : p.wave === 'sine' ? 0 : p.wave === 'saw' ? 0.5 : p.wave === 'triangle' ? 0.75 : 0;
     for (let i = 0; i < n; i++) {
       let code;
       const idx = i * lanes + lane;
-      const t = (idx - mid) * dt + phase0 / Math.max(p.freq, 1e-9);
+      const f0 = p.source === 'device' ? this.gen.freq : p.freq;
+      const t = (idx - mid) * dt + phase0 / Math.max(f0, 1e-9);
       if (d44 >= 3000) code = Math.floor((d44 - 3000) * 256 / 7000);          // POST ADC test: the swept DAC drives the codes
       else if (ip > 0) {
         const px = offPx + this.volts(p, t, n * lanes - idx) * k;

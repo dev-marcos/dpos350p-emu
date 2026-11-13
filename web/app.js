@@ -35,6 +35,7 @@ worker.onmessage = (ev) => {
   } else if (m.t === "frame") drawFrame(m);
   else if (m.t === "status") { status = m.s; renderStatus(); }
   else if (m.t === "error") { status.error = m.error; renderStatus(); }
+  else if (m.t === "gen") setGen(m.g);
 };
 worker.onerror = (e) => { $("#stat").textContent = t("stat.workerError", { err: e.message }); };
 
@@ -78,7 +79,7 @@ $("#btnShot").onclick = () => canvas.toBlob((b) => { const a = document.createEl
 $("#speed").onchange = (e) => call({ t: "control", action: "speed", value: +e.target.value });
 $("#lang").value = LANG;
 $("#lang").onchange = (e) => setLang(e.target.value);
-document.addEventListener("langchange", () => { chBuilt = false; renderStatus(); loadDir(cwd); listAudio().catch(() => {}); if ($("#pane-dev").classList.contains("active")) loadDev(); });
+document.addEventListener("langchange", () => { if (gen) setGen(gen); listGenOutputs(); chBuilt = false; renderStatus(); loadDir(cwd); listAudio().catch(() => {}); if ($("#pane-dev").classList.contains("active")) loadDev(); });
 
 function fmtInsns(n) { return n >= 1e9 ? (n / 1e9).toFixed(2) + " G" : (n / 1e6).toFixed(0) + " M"; }
 function renderStatus() {
@@ -96,6 +97,7 @@ function renderStatus() {
   if (s.factoryDone !== undefined) $("#factory").checked = s.factoryDone;
   if (!chBuilt && s.channels) buildChannels(s.channels);
   if (s.sdDirty) saveSdSoon();
+  if (s.gen) setGen(s.gen);
 }
 
 // ---------------------------------------------------------------- tabs
@@ -168,7 +170,7 @@ function buildChannels(chs) {
     <fieldset class="card ch${i + 1}"><legend>CH${i + 1}</legend>
       <div class="grid2">
         <span>${t("ch.on")}</span><label><input type="checkbox" data-ch="${i}" data-k="on" ${c.on ? "checked" : ""}> ${t("ch.onLabel")}</label>
-        <span>${t("ch.source")}</span><select data-ch="${i}" data-k="source"><option value="gen">${t("ch.gen")}</option><option value="audio">${t("ch.audio")}</option></select>
+        <span>${t("ch.source")}</span><select data-ch="${i}" data-k="source"><option value="gen">${t("ch.gen")}</option><option value="audio">${t("ch.audio")}</option><option value="device">${t("ch.device")}</option></select>
         <span>${t("ch.wave")}</span><select data-ch="${i}" data-k="wave">${WAVES.map((v) => `<option value="${v}">${t("wave." + v)}</option>`).join("")}</select>
         <span>${t("ch.freq")}</span><span><input class="num" type="number" min="0" step="any" data-ch="${i}" data-k="freq" value="${c.freq}"> Hz</span>
         <span>${t("ch.ampl")}</span><span><input class="num" type="number" min="0" step="any" data-ch="${i}" data-k="vpp" value="${c.vpp}"> Vpp</span>
@@ -231,6 +233,51 @@ setInterval(() => {
   pending = [];
   send({ t: "audio", samples: all.buffer, volts: +$("#audioVolts").value || 1, rate: audioCtx ? audioCtx.sampleRate : 48000 }, [all.buffer]);
 }, 100);
+
+// ---------------------------------------------------------------- scope generator -> sound card
+const GEN_WAVES = ["Sine", "Square", "Triangular", "Sawtooth1", "Sawtooth2", "Step", "Half", "Full", "Exponent", "Ringing", "Sqrt", "Multi-sin", "SinC", "DC", "Capture"];
+let gen = null, genCtx = null, genNode = null;
+function fmtHz(f) { return f >= 1e6 ? (f / 1e6).toFixed(3) + " MHz" : f >= 1e3 ? (f / 1e3).toFixed(3) + " kHz" : f + " Hz"; }
+function setGen(g) {
+  gen = g;
+  $("#genInfo").innerHTML = `<span>${t("gen.wave")}</span><span>${GEN_WAVES[g.wave] || g.wave}</span><span>${t("gen.freq")}</span><span>${fmtHz(g.freq)}</span>`
+    + `<span>${t("gen.ampl")}</span><span>${g.ampl.toFixed(3)} Vpp</span><span>${t("gen.offset")}</span><span>${g.offset.toFixed(3)} V</span>`
+    + (g.wave === 1 ? `<span>${t("gen.duty")}</span><span>${(g.duty * 100).toFixed(1)} %</span>` : "");
+  genNode?.port.postMessage({ g });
+  const nyq = genCtx ? genCtx.sampleRate / 2 : 24000;
+  const over = genNode && g.wave !== 13 && g.freq >= nyq;
+  $("#genWarn").hidden = !over;
+  if (over) $("#genWarn").textContent = t("gen.nyquist", { f: g.freq, n: nyq });
+}
+async function listGenOutputs() {
+  try {
+    const outs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "audiooutput" && d.deviceId !== "default");
+    const keep = $("#genDev").value;
+    $("#genDev").innerHTML = `<option value="">${t("gen.default")}</option>` + outs.map((d, i) => `<option value="${d.deviceId}">${esc(d.label || "Output " + (i + 1))}</option>`).join("");
+    $("#genDev").value = keep;
+  } catch (_) { /* no device list */ }
+}
+navigator.mediaDevices?.enumerateDevices && listGenOutputs();
+$("#genStart").onclick = async () => {
+  try {
+    genCtx = new AudioContext();
+    await genCtx.audioWorklet.addModule("gen-worklet.js");
+    genNode = new AudioWorkletNode(genCtx, "gen-out", { outputChannelCount: [2] });
+    genNode.port.onmessage = (e) => { if (e.data.peak !== undefined) $("#genLevel").style.width = Math.min(100, e.data.peak * 100) + "%"; };
+    genNode.port.postMessage({ scale: +$("#genVolts").value || 5, g: gen });
+    genNode.connect(genCtx.destination);
+    const sink = $("#genDev").value;
+    if (sink) { if (genCtx.setSinkId) await genCtx.setSinkId(sink); else alert(t("gen.noSink")); }
+    $("#genStart").disabled = true; $("#genStop").disabled = false;
+    if (gen) setGen(gen);
+  } catch (e) { alert(t("gen.error", { err: e.message })); genCtx?.close(); genCtx = genNode = null; }
+};
+$("#genStop").onclick = () => {
+  genNode?.disconnect(); genCtx?.close(); genCtx = genNode = null;
+  $("#genStart").disabled = false; $("#genStop").disabled = true; $("#genLevel").style.width = "0"; $("#genWarn").hidden = true;
+};
+$("#genVolts").onchange = () => genNode?.port.postMessage({ scale: +$("#genVolts").value || 5 });
+$("#genDev").onchange = async () => { if (genCtx && genCtx.setSinkId) await genCtx.setSinkId($("#genDev").value || ""); };
 
 // ---------------------------------------------------------------- file manager (SD card)
 let cwd = "/";

@@ -28,6 +28,8 @@ node tests/serve.mjs            # then open http://localhost:8351
 | Runs the machine off the UI thread; snapshots; file manager | `web/core/worker.js` |
 | FAT12/16/32 read/write, FAT32 format | `web/core/fat.js` |
 | `.iso` container → `app.bin` | `web/core/iso.js` |
+| The scope's signal generator: settings read from the firmware, waveform shapes | `web/core/genwave.js` |
+| Generator output on the computer's sound card (AudioWorklet) | `web/gen-worklet.js` |
 | Synthetic channel calibration (SPI flash 0x1FB000) and the conversion it feeds | `web/core/calibration.js` |
 | Page: device frame with side LEDs, screen, tabs Files / Channels / System / Dev; English or Portuguese | `web/index.html`, `web/app.js`, `web/i18n.js`, `web/style.css`, `web/frame.svg` |
 
@@ -72,6 +74,11 @@ repository). It stays as the reference for the JavaScript port.
   up to 0.95 GS/s, with the trigger in the middle of the record the firmware converts. Checked from
   1 ms to 500 ns/div: period and trigger position exact, frequency reading exact. Below 1 us/div the
   trace drifts by up to 10 px.
+- The generator (GEN menu) can play on the sound card (Channels tab) and can feed a probe ("Scope
+  generator" source). Its settings are read from the firmware state at 0x42E4287E..0x42E4288F. The
+  waveform shapes come from the menu names (ASSUMPTION): the sample table the firmware sends to the
+  FPGA (selectors 0x3F/0x40/0x43) is not decoded yet. A sound card cannot play frequencies above half
+  its sample rate.
 - Both channels work: lanes 0..3 feed CH1 and 4..7 feed CH2, with half the rate per channel.
 - The volts → ADC code conversion is an assumption until the front-end gain chain is
   reverse-engineered.
