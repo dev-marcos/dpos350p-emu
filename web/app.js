@@ -1,58 +1,96 @@
-// DSO-350 emulator front end. Talks only to the local API (later replaceable by a WebAssembly core).
+// DSO-350 emulator front end. Everything runs in this browser: the machine runs in a Web Worker
+// (core/worker.js); the firmware, the SD-card image and saved states are kept in IndexedDB.
 "use strict";
 const $ = (s) => document.querySelector(s);
-const api = async (path, opts = {}) => {
-  const r = await fetch(path, opts);
-  const ct = r.headers.get("content-type") || "";
-  const body = ct.includes("json") ? await r.json() : await r.blob();
-  if (!r.ok) throw new Error(body.error || r.statusText);
-  return body;
-};
-const post = (path, obj) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(obj || {}) });
+
+// ---------------------------------------------------------------- storage (IndexedDB key/value)
+const db = new Promise((res, rej) => {
+  const r = indexedDB.open("dso350-emu", 1);
+  r.onupgradeneeded = () => r.result.createObjectStore("kv");
+  r.onsuccess = () => res(r.result);
+  r.onerror = () => rej(r.error);
+});
+const kvGet = async (k) => { const d = await db; return new Promise((res, rej) => { const q = d.transaction("kv").objectStore("kv").get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); };
+const kvSet = async (k, v) => { const d = await db; return new Promise((res, rej) => { const t = d.transaction("kv", "readwrite"); t.objectStore("kv").put(v, k); t.oncomplete = () => res(); t.onerror = () => rej(t.error); }); };
+const kvDel = async (k) => { const d = await db; return new Promise((res) => { const t = d.transaction("kv", "readwrite"); t.objectStore("kv").delete(k); t.oncomplete = () => res(); }); };
+
+// ---------------------------------------------------------------- worker
+const worker = new Worker("core/worker.js", { type: "module" });
+let nextId = 1;
+const waiting = new Map();
+const call = (msg, transfer) => new Promise((res, rej) => {
+  const id = nextId++;
+  waiting.set(id, { res, rej });
+  worker.postMessage({ ...msg, id }, transfer || []);
+});
+const send = (msg, transfer) => worker.postMessage(msg, transfer || []);
 let status = {};
+worker.onmessage = (ev) => {
+  const m = ev.data;
+  if (m.t === "reply") {
+    const w = waiting.get(m.id); waiting.delete(m.id);
+    if (!w) return;
+    if (m.ok === false) w.rej(new Error(m.error)); else w.res(m);
+  } else if (m.t === "frame") drawFrame(m);
+  else if (m.t === "status") { status = m.s; renderStatus(); }
+  else if (m.t === "error") { status.error = m.error; renderStatus(); }
+};
+worker.onerror = (e) => { $("#stat").textContent = "erro no emulador: " + e.message; };
 
 // ---------------------------------------------------------------- screen + touch
-const screen = $("#screen");
-function nextFrame() { screen.src = "frame.png?" + Date.now(); }
-screen.onload = () => setTimeout(nextFrame, 120);
-screen.onerror = () => setTimeout(nextFrame, 1000);
-function screenPos(e) {
-  const r = screen.getBoundingClientRect();
-  return { x: Math.round((e.clientX - r.left) * 1022 / r.width), y: Math.round((e.clientY - r.top) * 600 / r.height) };
+const canvas = $("#screen"), ctx2d = canvas.getContext("2d");
+let img = null;
+function drawFrame({ w, h, pitch, buf }) {
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; img = null; }
+  if (!img) img = ctx2d.createImageData(w, h);
+  const src = new Uint16Array(buf, 0, (pitch * h) >> 1), dst = new Uint32Array(img.data.buffer), stride = pitch >> 1;
+  for (let y = 0; y < h; y++) {
+    let s = y * stride, d = y * w;
+    for (let x = 0; x < w; x++, s++, d++) {
+      const v = src[s];
+      const r = (v >> 11) << 3, g = ((v >> 5) & 0x3F) << 2, b = (v & 0x1F) << 3;
+      dst[d] = 0xFF000000 | (b << 16) | (g << 8) | r;
+    }
+  }
+  ctx2d.putImageData(img, 0, 0);
+  $("#noFw").hidden = true;
 }
-// touch events are sent strictly in order (parallel requests could reach the emulator swapped)
-let pressing = false, lastMove = 0, touchChain = Promise.resolve();
-const sendTouch = (kind, p) => { touchChain = touchChain.then(() => post("/api/touch", { kind, ...p })).catch(() => {}); };
-screen.addEventListener("pointerdown", (e) => {
+function screenPos(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: Math.round((e.clientX - r.left) * canvas.width / r.width), y: Math.round((e.clientY - r.top) * canvas.height / r.height) };
+}
+let pressing = false, lastMove = 0;
+canvas.addEventListener("pointerdown", (e) => {
   pressing = true;
-  try { screen.setPointerCapture(e.pointerId); } catch (_) { /* synthetic pointer */ }
-  sendTouch("down", screenPos(e)); e.preventDefault();
+  try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* synthetic pointer */ }
+  send({ t: "touch", kind: "down", ...screenPos(e) }); e.preventDefault();
 });
-screen.addEventListener("pointermove", (e) => { if (!pressing || Date.now() - lastMove < 30) return; lastMove = Date.now(); sendTouch("move", screenPos(e)); });
-const release = (e) => { if (!pressing) return; pressing = false; sendTouch("up", screenPos(e)); };
-screen.addEventListener("pointerup", release);
-screen.addEventListener("pointercancel", release);
+canvas.addEventListener("pointermove", (e) => { if (!pressing || Date.now() - lastMove < 30) return; lastMove = Date.now(); send({ t: "touch", kind: "move", ...screenPos(e) }); });
+const release = (e) => { if (!pressing) return; pressing = false; send({ t: "touch", kind: "up", ...screenPos(e) }); };
+canvas.addEventListener("pointerup", release);
+canvas.addEventListener("pointercancel", release);
 
 // ---------------------------------------------------------------- top bar
-$("#btnRun").onclick = async () => { status = await post("/api/control", { action: status.paused ? "resume" : "pause" }); renderStatus(); };
-$("#btnReset").onclick = async () => { status = await post("/api/control", { action: "reset" }); renderStatus(); };
-$("#btnShot").onclick = () => { const a = document.createElement("a"); a.href = "frame.png?" + Date.now(); a.download = "tela-dso350.png"; a.click(); };
+$("#btnRun").onclick = async () => { status = (await call({ t: "control", action: status.paused ? "resume" : "pause" })).status; renderStatus(); };
+$("#btnReset").onclick = async () => { status = (await call({ t: "control", action: "reset" })).status; renderStatus(); };
+$("#btnShot").onclick = () => canvas.toBlob((b) => { const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = "tela-dso350.png"; a.click(); });
+$("#speed").onchange = (e) => call({ t: "control", action: "speed", value: +e.target.value });
 
 function fmtInsns(n) { return n >= 1e9 ? (n / 1e9).toFixed(2) + " G" : (n / 1e6).toFixed(0) + " M"; }
 function renderStatus() {
   const s = status;
-  if (!s.loaded) { $("#stat").textContent = "nenhum firmware carregado — use Sistema → Carregar firmware"; return; }
+  if (!s.loaded) { $("#stat").textContent = "nenhum firmware carregado"; $("#noFw").hidden = false; return; }
   $("#btnRun").textContent = s.paused ? "▶ Continuar" : "⏸ Pausar";
-  $("#stat").textContent = s.error ? "parou: " + s.error : `${fmtInsns(s.insns)} instr · ${s.mips} M/s · IRQs ${s.irqs} · quadros ${s.csi_frames}`;
+  $("#stat").textContent = s.error ? "parou: " + s.error : `${fmtInsns(s.insns || 0)} instr · ${s.mips} M/s · ${s.emuSeconds} s emulados · IRQs ${s.irqs}`;
   const fw = s.image || {};
-  $("#fwInfo").innerHTML = `<span>Origem</span><span>${fw.source || "—"}</span><span>Tamanho</span><span>${fw.size || "—"}</span><span>SHA-256</span><span>${fw.sha256 || "—"}</span>`;
-  if (document.activeElement !== $("#batt")) { $("#batt").value = s.battery_mv; }
-  $("#battV").textContent = (s.battery_mv / 1000).toFixed(2) + " V";
-  $("#charging").checked = s.charging;
-  $("#factory").checked = s.factory_done;
+  $("#fwInfo").innerHTML = `<span>Origem</span><span>${fw.source || "—"}</span><span>Tamanho</span><span>${fw.size || "—"}</span><span>SHA-256</span><span>${fw.sha ? fw.sha + "…" : "—"}</span>`;
+  if (s.batteryMv !== undefined && document.activeElement !== $("#batt")) $("#batt").value = s.batteryMv;
+  if (s.batteryMv !== undefined) $("#battV").textContent = (s.batteryMv / 1000).toFixed(2) + " V";
+  $("#charging").checked = !!s.charging;
+  if (s.factoryDone !== undefined) $("#factory").checked = s.factoryDone;
   if (!chBuilt && s.channels) buildChannels(s.channels);
+  if (s.sdDirty) saveSdSoon();
 }
-setInterval(async () => { try { status = await api("/api/status"); renderStatus(); } catch (e) { $("#stat").textContent = "servidor offline"; } }, 700);
 
 // ---------------------------------------------------------------- tabs
 document.querySelectorAll(".tab").forEach((t) => t.onclick = () => {
@@ -62,26 +100,57 @@ document.querySelectorAll(".tab").forEach((t) => t.onclick = () => {
   if (t.dataset.tab === "dev") loadDev();
 });
 
-// ---------------------------------------------------------------- firmware upload (button + drag & drop)
+// ---------------------------------------------------------------- firmware (button + drag & drop); kept in IndexedDB
 async function uploadFirmware(file) {
   $("#stat").textContent = "carregando " + file.name + "…";
-  try { status = await api("/api/firmware?name=" + encodeURIComponent(file.name), { method: "POST", body: file }); renderStatus(); }
-  catch (e) { alert("Firmware recusado: " + e.message); }
+  try {
+    const data = await file.arrayBuffer();
+    const r = await call({ t: "firmware", data, name: file.name }, [data]);
+    await kvSet("firmware", { app: r.app, info: r.info });
+    chBuilt = false;
+  } catch (e) { alert("Firmware recusado: " + e.message); }
 }
-$("#fwFile").onchange = (e) => e.target.files[0] && uploadFirmware(e.target.files[0]);
-const dev = $("#device"), drop = $("#drop");
-dev.addEventListener("dragover", (e) => { e.preventDefault(); drop.hidden = false; });
-dev.addEventListener("dragleave", () => drop.hidden = true);
-dev.addEventListener("drop", (e) => { e.preventDefault(); drop.hidden = true; const f = e.dataTransfer.files[0]; if (f) uploadFirmware(f); });
+document.querySelectorAll(".fwFile").forEach((el) => el.onchange = (e) => e.target.files[0] && uploadFirmware(e.target.files[0]));
+$("#fwForget").onclick = async () => { if (confirm("Esquecer o firmware guardado neste navegador?")) { await kvDel("firmware"); location.reload(); } };
+const devEl = $("#device"), drop = $("#drop");
+devEl.addEventListener("dragover", (e) => { e.preventDefault(); drop.hidden = false; });
+devEl.addEventListener("dragleave", () => drop.hidden = true);
+devEl.addEventListener("drop", (e) => { e.preventDefault(); drop.hidden = true; const f = e.dataTransfer.files[0]; if (f) uploadFirmware(f); });
 
 // ---------------------------------------------------------------- system pane
 $("#batt").oninput = (e) => { $("#battV").textContent = (e.target.value / 1000).toFixed(2) + " V"; };
-$("#batt").onchange = (e) => post("/api/battery", { mv: +e.target.value });
-$("#charging").onchange = (e) => post("/api/battery", { charging: e.target.checked });
-$("#factory").onchange = (e) => post("/api/control", { action: "factory_done", value: e.target.checked });
-$("#snapSave").onclick = () => post("/api/control", { action: "snapshot_save" }).then(() => alert("Estado salvo."));
-$("#snapLoad").onclick = () => post("/api/control", { action: "snapshot_load" }).catch((e) => alert(e.message));
-$("#sdSave").onclick = () => post("/api/control", { action: "save_sd" }).then(() => alert("Cartão gravado em build/sim/sdcard.img."));
+$("#batt").onchange = (e) => call({ t: "battery", mv: +e.target.value });
+$("#charging").onchange = (e) => call({ t: "battery", charging: e.target.checked });
+$("#factory").onchange = async (e) => { await call({ t: "control", action: "factory", value: e.target.checked }); await kvSet("factoryDone", e.target.checked); };
+$("#snapSave").onclick = async () => {
+  $("#snapSave").disabled = true;
+  try { const r = await call({ t: "snapshotSave" }); await kvSet("snapshot", r.snapshot); alert("Estado salvo neste navegador."); }
+  catch (e) { alert("Não foi possível salvar: " + e.message); }
+  $("#snapSave").disabled = false;
+};
+$("#snapLoad").onclick = async () => {
+  const s = await kvGet("snapshot");
+  if (!s) return alert("Nenhum estado salvo.");
+  try { await call({ t: "snapshotLoad", snapshot: s }); } catch (e) { alert(e.message); }
+};
+$("#sdDownload").onclick = async () => {
+  const r = await call({ t: "getSd" });
+  await kvSet("sd", r.sd);
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([r.sd])); a.download = "sdcard-dso350.img"; a.click();
+};
+$("#sdImage").onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  if (!confirm(`Usar "${f.name}" como cartão SD? O cartão atual será substituído.`)) return;
+  await kvSet("sd", await f.arrayBuffer());
+  location.reload();
+};
+
+// SD image persistence: saved a few seconds after the firmware or the file manager changes it
+let sdTimer = null;
+function saveSdSoon() {
+  if (sdTimer) return;
+  sdTimer = setTimeout(async () => { try { const r = await call({ t: "getSd" }); await kvSet("sd", r.sd); } catch (_) { /* ignore */ } sdTimer = null; }, 3000);
+}
 
 // ---------------------------------------------------------------- channels
 let chBuilt = false;
@@ -105,18 +174,18 @@ function buildChannels(chs) {
     if (el.classList.contains("seg")) {
       el.querySelectorAll("button").forEach((b) => b.onclick = () => {
         el.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
-        post("/api/channel", { ch: +el.dataset.ch, probe: +b.dataset.v });
+        call({ t: "channel", ch: +el.dataset.ch, values: { probe: +b.dataset.v } });
       });
       return;
     }
     el.onchange = () => {
       const v = el.type === "checkbox" ? el.checked : el.type === "number" ? +el.value : el.value;
-      post("/api/channel", { ch: +el.dataset.ch, [el.dataset.k]: v });
+      call({ t: "channel", ch: +el.dataset.ch, values: { [el.dataset.k]: v } });
     };
   });
 }
 
-// ---------------------------------------------------------------- audio input (getUserMedia -> PCM chunks to the emulator)
+// ---------------------------------------------------------------- audio input (getUserMedia -> PCM chunks to the worker)
 let audioCtx = null, audioNode = null, audioStream = null, pending = [];
 async function listAudio() {
   const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "audioinput");
@@ -151,27 +220,29 @@ setInterval(() => {
   const n = pending.reduce((a, b) => a + b.length, 0), all = new Float32Array(n);
   let o = 0; for (const p of pending) { all.set(p, o); o += p.length; }
   pending = [];
-  api("/api/audio?volts=" + (+$("#audioVolts").value || 1), { method: "POST", body: all.buffer }).catch(() => {});
+  send({ t: "audio", samples: all.buffer, volts: +$("#audioVolts").value || 1 }, [all.buffer]);
 }, 100);
 
 // ---------------------------------------------------------------- file manager (SD card)
 let cwd = "/";
 const human = (n) => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : (n / 1048576).toFixed(1) + " MB";
 const join = (a, b) => (a.endsWith("/") ? a : a + "/") + b;
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 async function loadDir(path) {
   try {
-    const r = await api("/api/fs?path=" + encodeURIComponent(path));
+    const r = await call({ t: "fs", op: "list", path });
     cwd = path; $("#crumbs").textContent = path; $("#crumbs").title = path;
     const rows = r.entries.sort((a, b) => (b.dir - a.dir) || a.name.localeCompare(b.name));
     $("#fsList").innerHTML = rows.map((e) => `<tr>
-      <td class="name" data-dir="${e.dir ? 1 : 0}" data-name="${encodeURIComponent(e.name)}">${e.dir ? "📁" : "📄"} ${e.name}</td>
+      <td class="name" data-dir="${e.dir ? 1 : 0}" data-name="${encodeURIComponent(e.name)}">${e.dir ? "📁" : "📄"} ${esc(e.name)}</td>
       <td class="r">${e.dir ? "" : human(e.size)}</td><td>${e.time}</td>
       <td class="act"><button data-del="${encodeURIComponent(e.name)}" title="Apagar">✕</button></td></tr>`).join("")
       || `<tr><td colspan="4" class="note">pasta vazia</td></tr>`;
     $("#fsNote").classList.remove("warn");
+    $("#fsNote").innerHTML = "Cartão SD emulado (64 MB), guardado neste navegador. Depois de enviar ou apagar arquivos, use <b>Reiniciar</b> para o firmware enxergar a mudança.";
   } catch (e) {
     $("#fsList").innerHTML = "";
-    $("#fsNote").textContent = "Cartão ainda sem sistema de arquivos (" + e.message + "). Deixe o firmware iniciar e formatar o cartão, depois atualize.";
+    $("#fsNote").textContent = "Cartão ainda sem sistema de arquivos (" + e.message + "). Deixe o firmware iniciar e formatar o cartão, ou use Formatar.";
     $("#fsNote").classList.add("warn");
   }
 }
@@ -180,29 +251,30 @@ $("#fsList").onclick = async (ev) => {
   if (t.dataset.del) {
     const name = decodeURIComponent(t.dataset.del);
     if (!confirm(`Apagar "${name}" do cartão emulado?`)) return;
-    try { await api("/api/fs/delete?path=" + encodeURIComponent(join(cwd, name)), { method: "POST" }); } catch (e) { alert(e.message); }
+    try { await call({ t: "fs", op: "delete", path: join(cwd, name) }); } catch (e) { alert(e.message); }
     return loadDir(cwd);
   }
   const td = t.closest(".name"); if (!td) return;
   const name = decodeURIComponent(td.dataset.name);
   if (td.dataset.dir === "1") return loadDir(join(cwd, name));
-  const a = document.createElement("a"); a.href = "/api/fs/file?path=" + encodeURIComponent(join(cwd, name)); a.download = name; a.click();
+  const r = await call({ t: "fs", op: "read", path: join(cwd, name) });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([r.data])); a.download = name; a.click();
 };
 $("#fsUp").onclick = () => loadDir(cwd === "/" ? "/" : cwd.replace(/\/[^/]+\/?$/, "") || "/");
 $("#fsRefresh").onclick = () => loadDir(cwd);
 $("#fsMkdir").onclick = async () => {
   const n = prompt("Nome da nova pasta:"); if (!n) return;
-  try { await api("/api/fs/mkdir?path=" + encodeURIComponent(join(cwd, n)), { method: "POST" }); } catch (e) { alert(e.message); }
+  try { await call({ t: "fs", op: "mkdir", path: join(cwd, n) }); } catch (e) { alert(e.message); }
   loadDir(cwd);
 };
 $("#fsFormat").onclick = async () => {
   if (!confirm("Formatar o cartão SD emulado em FAT32? Todos os arquivos do cartão serão apagados.")) return;
-  try { await api("/api/fs/format", { method: "POST" }); } catch (e) { alert(e.message); }
+  try { await call({ t: "fs", op: "format" }); } catch (e) { alert(e.message); }
   loadDir("/");
 };
 $("#fsUpload").onchange = async (e) => {
   for (const f of e.target.files) {
-    try { await api("/api/fs/file?path=" + encodeURIComponent(join(cwd, f.name)), { method: "POST", body: f }); }
+    try { const data = await f.arrayBuffer(); await call({ t: "fs", op: "write", path: join(cwd, f.name), data }, [data]); }
     catch (err) { alert(f.name + ": " + err.message); }
   }
   e.target.value = ""; loadDir(cwd);
@@ -211,14 +283,37 @@ $("#fsUpload").onchange = async (e) => {
 // ---------------------------------------------------------------- dev pane
 async function loadDev() {
   try {
-    const d = await api("/api/dev"), s = status;
-    $("#devExec").innerHTML = `<span>PC</span><span>${s.pc}</span><span>Instruções</span><span>${fmtInsns(s.insns || 0)}</span><span>Velocidade</span><span>${s.mips} M/s</span><span>Toque</span><span>${s.touch || "—"}</span><span>Flash/SD</span><span>${d.flash_reads} leituras · ${d.sd_commands} comandos</span>`;
+    const d = (await call({ t: "dev" })).info, s = status;
+    if (!d.regs) return;
+    $("#devExec").innerHTML = `<span>PC</span><span>${esc(s.pc)}</span><span>Instruções</span><span>${fmtInsns(s.insns || 0)}</span><span>Velocidade</span><span>${s.mips} M/s</span>`
+      + `<span>CPSR</span><span>${d.cpsr}</span><span>Registradores</span><span>${d.regs.map((v, i) => `r${i}=${v}`).join(" ")}</span>`
+      + `<span>Flash/SD</span><span>${d.flashReads} leituras · ${d.sdCommands} comandos</span><span>Toque</span><span>${s.touchReads} leituras</span>`;
     $("#devIrq").innerHTML = Object.entries(d.gic).map(([k, v]) => `<span>IRQ ${k}${({ 50: " (timer 0)", 116: " (CSI)", 103: " (USB)" })[k] || ""}</span><span>${v}</span>`).join("") || "<span>—</span><span></span>";
-    $("#devFpga").innerHTML = Object.entries(d.fpga_reads).map(([k, v]) => `<span>${k}: ${v}</span>`).join("");
-    $("#devMmio").innerHTML = d.unmodelled.map((u) => `<tr><td>${u.op}${u.size}</td><td class="mono">${u.addr}</td><td class="r">${u.count}</td><td class="mono">${u.first}</td></tr>`).join("");
-    $("#devHot").innerHTML = d.hot.map((h) => `${h.samples} · ${h.where}`).join("<br>");
+    $("#devFpga").innerHTML = Object.entries(d.fpgaReads).map(([k, v]) => `<span>${k}: ${v}</span>`).join("");
+    $("#devMmio").innerHTML = d.unmodelled.map((u) => `<tr><td>${u.op}${u.size}</td><td class="mono">${u.addr}</td><td class="r">${u.count}</td><td class="mono">${esc(u.first)}</td></tr>`).join("");
+    $("#devHot").innerHTML = d.hot.map((h) => `${h.samples} · ${esc(h.where)}`).join("<br>");
     $("#devUart").textContent = d.uart || "(sem saída)";
-  } catch (e) { /* server busy */ }
+  } catch (e) { /* busy */ }
 }
 setInterval(() => { if ($("#pane-dev").classList.contains("active") && $("#devAuto").checked) loadDev(); }, 1500);
-loadDir("/");
+$("#peekGo").onclick = async () => {
+  try {
+    const addr = parseInt($("#peekAddr").value, 16), n = +$("#peekLen").value || 64;
+    const r = await call({ t: "peek", addr, n });
+    const lines = [];
+    for (let i = 0; i < r.data.length; i += 16) lines.push((addr + i).toString(16).padStart(8, "0") + "  " + r.data.slice(i, i + 16).map((b) => b.toString(16).padStart(2, "0")).join(" "));
+    $("#peekOut").textContent = lines.join("\n");
+  } catch (e) { $("#peekOut").textContent = e.message; }
+};
+
+// ---------------------------------------------------------------- start-up
+(async () => {
+  let symbols = null;
+  try { const r = await fetch("data/symbols.json"); if (r.ok) symbols = await r.json(); } catch (_) { /* optional */ }
+  const fw = await kvGet("firmware").catch(() => null);
+  const sd = await kvGet("sd").catch(() => null);
+  const factoryDone = await kvGet("factoryDone").catch(() => undefined);
+  const r = await call({ t: "init", app: fw ? fw.app : null, info: fw ? fw.info : null, sd: sd || null, symbols, opts: { factoryDone: factoryDone !== false } });
+  status = r.status; renderStatus();
+  loadDir("/");
+})();

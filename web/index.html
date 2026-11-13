@@ -8,11 +8,14 @@
 </head>
 <body>
 <header class="topbar">
-  <div class="brand">Emulador <b>DSO-350</b> <span class="muted">firmware 2025-06-19</span></div>
+  <div class="brand">Emulador <b>DSO-350</b> <span class="muted">firmware 2025-06-19 · roda no navegador</span></div>
   <div class="controls">
     <button id="btnRun" title="Pausar / continuar">⏸ Pausar</button>
     <button id="btnReset" title="Reiniciar o aparelho (liga de novo)">⟲ Reiniciar</button>
     <button id="btnShot" title="Salvar a tela como PNG">⤓ Tela</button>
+    <select id="speed" title="Velocidade">
+      <option value="0">Máxima</option><option value="1">Tempo real</option><option value="0.5">0,5×</option><option value="2">2×</option>
+    </select>
     <span id="stat" class="stat">—</span>
   </div>
 </header>
@@ -21,7 +24,13 @@
   <section class="stage">
     <div class="device" id="device">
       <img class="frame" src="frame.svg" alt="" draggable="false">
-      <img class="screen" id="screen" src="frame.png" alt="tela do emulador" draggable="false">
+      <canvas class="screen" id="screen" width="1022" height="600" aria-label="tela do emulador"></canvas>
+      <div class="nofw" id="noFw" hidden>
+        <p><b>Carregue o firmware</b></p>
+        <p>Arquivo de atualização do DPOS350P (<code>.iso</code>) ou <code>app.bin</code>.</p>
+        <label class="btn">Escolher arquivo<input type="file" class="fwFile" accept=".iso,.bin" hidden></label>
+        <p class="note">O arquivo fica só neste navegador. Nada é enviado para servidor nenhum.</p>
+      </div>
       <div class="drop" id="drop" hidden>Solte aqui o firmware (.iso ou app.bin)</div>
     </div>
     <p class="hint">Clique e arraste na tela para tocar. Arraste um arquivo de firmware sobre o aparelho para carregá-lo.</p>
@@ -49,7 +58,7 @@
       </div>
       <table class="files"><thead><tr><th>Nome</th><th class="r">Tamanho</th><th>Data</th><th></th></tr></thead>
         <tbody id="fsList"></tbody></table>
-      <p class="note" id="fsNote">Cartão SD emulado (64 MB). Na primeira execução o firmware o formata sozinho. Depois de enviar ou apagar arquivos, use <b>Reiniciar</b> para o firmware enxergar a mudança.</p>
+      <p class="note" id="fsNote">Cartão SD emulado (64 MB), guardado neste navegador.</p>
     </div>
 
     <!-- CANAIS -->
@@ -63,10 +72,10 @@
           <button id="audioStop" disabled>■ Parar</button>
         </div>
         <label class="row gap">Fundo de escala = <input id="audioVolts" type="number" value="1" step="0.1" min="0.01" class="num"> V</label>
-        <p class="note">Escolha "Áudio" como fonte em um canal para injetar o sinal capturado (microfone, entrada de linha ou cabo virtual).</p>
+        <p class="note">Escolha "Áudio do PC" como fonte em um canal para injetar o sinal capturado (microfone, entrada de linha ou cabo virtual).</p>
         <div class="meter"><div id="audioLevel"></div></div>
       </fieldset>
-      <p class="note warn">A conversão volts → código do ADC ainda é uma aproximação (o ganho real por V/div está em engenharia reversa). A forma, a frequência e as proporções valem; a escala absoluta ainda não.</p>
+      <p class="note warn">A conversão volts → código do ADC ainda é uma aproximação, e o traço só aparece quando a calibração do aparelho estiver modelada. A forma, a frequência e as proporções valem; a escala absoluta ainda não.</p>
     </div>
 
     <!-- SISTEMA -->
@@ -74,8 +83,9 @@
       <fieldset class="card">
         <legend>Firmware</legend>
         <div id="fwInfo" class="kv"></div>
-        <label class="btn wide">Carregar firmware (.iso ou app.bin)<input type="file" id="fwFile" accept=".iso,.bin" hidden></label>
-        <p class="note">O arquivo fica só no seu computador (build/sim/). Nada é enviado para fora.</p>
+        <label class="btn wide">Carregar firmware (.iso ou app.bin)<input type="file" class="fwFile" accept=".iso,.bin" hidden></label>
+        <button id="fwForget" class="wide">Esquecer o firmware guardado</button>
+        <p class="note">O arquivo fica só neste navegador (IndexedDB). Nada é enviado para fora.</p>
       </fieldset>
       <fieldset class="card">
         <legend>Bateria</legend>
@@ -88,8 +98,10 @@
         <p class="note">Vale no próximo <b>Reiniciar</b>.</p>
       </fieldset>
       <fieldset class="card">
-        <legend>Estado salvo</legend>
-        <div class="row gap"><button id="snapSave">Salvar estado</button><button id="snapLoad">Restaurar estado</button><button id="sdSave">Gravar cartão SD</button></div>
+        <legend>Estado e cartão</legend>
+        <div class="row gap wrap"><button id="snapSave">Salvar estado</button><button id="snapLoad">Restaurar estado</button></div>
+        <div class="row gap wrap" style="margin-top:8px"><button id="sdDownload">Baixar imagem do cartão</button>
+          <label class="btn">Usar imagem de cartão…<input type="file" id="sdImage" accept=".img,.bin" hidden></label></div>
       </fieldset>
     </div>
 
@@ -97,6 +109,9 @@
     <div class="pane" id="pane-dev">
       <div class="row gap"><label class="row gap"><input type="checkbox" id="devAuto" checked> Atualizar</label></div>
       <h4>Execução</h4><div id="devExec" class="kv"></div>
+      <h4>Memória</h4>
+      <div class="row gap"><input id="peekAddr" type="text" value="42E68AE0" class="num mono" title="endereço (hex)"><input id="peekLen" type="number" value="64" class="num"><button id="peekGo">Ler</button></div>
+      <pre id="peekOut" class="log mono"></pre>
       <h4>Interrupções</h4><div id="devIrq" class="kv"></div>
       <h4>FPGA (leituras por seletor)</h4><div id="devFpga" class="chips"></div>
       <h4>Periféricos sem modelo</h4>

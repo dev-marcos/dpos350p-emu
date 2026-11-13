@@ -78,11 +78,11 @@ class Sim:
         # byte 0x42E68B01), report success so the boot continues to the main screen.
         self.bypass_calibration = bypass_calibration
         if bypass_calibration:
-            uc.hook_add(UC_HOOK_CODE, lambda u, a, sz, d: u.mem_write(0x42E68B01, b""), None, 0x400513DC, 0x400513DC)
+            uc.hook_add(UC_HOOK_CODE, lambda u, a, sz, d: u.mem_write(0x42E68B01, b"\x01"), None, 0x400513DC, 0x400513DC)
             # channel-multiplex check (needs calibrated measurements): result byte 0x42E68AF3
-            uc.hook_add(UC_HOOK_CODE, lambda u, a, sz, d: u.mem_write(0x42E68AF3, b""), None, 0x4005141C, 0x4005141C)
+            uc.hook_add(UC_HOOK_CODE, lambda u, a, sz, d: u.mem_write(0x42E68AF3, b"\x01"), None, 0x4005141C, 0x4005141C)
             # 150 MHz bandwidth-limit check (same calibrated measurement): result byte 0x42E68B1F
-            uc.hook_add(UC_HOOK_CODE, lambda u, a, sz, d: u.mem_write(0x42E68B1F, b""), None, 0x400514D8, 0x400514D8)
+            uc.hook_add(UC_HOOK_CODE, lambda u, a, sz, d: u.mem_write(0x42E68B1F, b"\x01"), None, 0x400514D8, 0x400514D8)
         # A shipped unit has finished the factory flow: its saved state (0x42E68AE0, loaded from the
         # SPI-flash settings) holds 0x5A5555A5, so the POST and the "insert the tester" steps are
         # skipped. Our flash starts blank; factory_done reproduces the shipped state at the check.
