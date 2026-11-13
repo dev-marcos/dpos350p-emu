@@ -202,7 +202,7 @@ self.onmessage = async (ev) => {
         break;
       case 'touch': if (m) m.dev.touch.event(q.kind, q.x, q.y); break;
       case 'channel': if (m) Object.assign(m.dev.frontend.ch[q.ch], q.values); reply({ ok: true }); break;
-      case 'audio': if (m) { m.dev.frontend.pushAudio(new Float32Array(q.samples)); if (q.volts) m.dev.frontend.audioVolts = q.volts; } break;
+      case 'audio': if (m) { m.dev.frontend.pushAudio(new Float32Array(q.samples)); if (q.volts) m.dev.frontend.audioVolts = q.volts; if (q.rate) m.dev.frontend.audioRate = q.rate; } break;
       case 'battery': if (m) { if (q.mv !== undefined) m.dev.batteryMv = +q.mv; if (q.charging !== undefined) m.dev.charging = !!q.charging; } reply({ ok: true }); break;
       case 'fs': { const r = fs(q.op, q.path, q.data); const tr = r.data ? [r.data.buffer] : []; reply({ ok: true, ...r, data: r.data ? r.data.buffer : undefined }, tr); break; }
       case 'getSd': { sdDirty = false; const copy = sd.slice(); reply({ ok: true, sd: copy.buffer }, [copy.buffer]); break; }

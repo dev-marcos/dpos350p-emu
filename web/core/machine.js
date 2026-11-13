@@ -11,6 +11,7 @@ export const FB_LAYER = 0x01104000;              // DE2 mixer 0, UI channel 1
 
 export class Machine {
   constructor(image, opts = {}) {
+    this.opts = opts;
     this.sdImage = opts.sdImage || new Uint8Array(64 << 20);
     this.dram = new Uint8Array(DRAM_SIZE);
     this.sram = new Uint8Array(SRAM_SIZE);

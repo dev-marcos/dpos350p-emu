@@ -220,7 +220,7 @@ setInterval(() => {
   const n = pending.reduce((a, b) => a + b.length, 0), all = new Float32Array(n);
   let o = 0; for (const p of pending) { all.set(p, o); o += p.length; }
   pending = [];
-  send({ t: "audio", samples: all.buffer, volts: +$("#audioVolts").value || 1 }, [all.buffer]);
+  send({ t: "audio", samples: all.buffer, volts: +$("#audioVolts").value || 1, rate: audioCtx ? audioCtx.sampleRate : 48000 }, [all.buffer]);
 }, 100);
 
 // ---------------------------------------------------------------- file manager (SD card)

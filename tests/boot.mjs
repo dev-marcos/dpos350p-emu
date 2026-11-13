@@ -21,6 +21,11 @@ if (fs.existsSync(csv)) {
 }
 
 const m = new Machine(image, { symbols, factoryDone: !args.includes('--no-factory-done'), bypassCalibration: args.includes('--bypass-calibration') });
+// --ch1 / --ch2 'freq=20000,vpp=1,wave=square' set the virtual probe signals
+for (const [flag, c] of [['--ch1', 0], ['--ch2', 1]]) {
+  const v = opt(flag, null);
+  if (v) for (const kv of v.split(',')) { const [k, x] = kv.split('='); m.dev.frontend.ch[c][k] = isNaN(+x) ? x : +x; }
+}
 const t0 = Date.now();
 let last = t0, lastI = 0;
 m.boot(n, 500000, (mm) => {
@@ -41,6 +46,7 @@ for (const e of [...m.unmodelled.values()].sort((a, b) => a.addr - b.addr)) cons
 const uart = m.dev.uartText();
 if (uart) console.log('== UART output:\n' + uart);
 
+function savePng(pngPath) {
 const fb = m.framebuffer();
 if (fb) {
   const raw = Buffer.alloc((fb.w * 3 + 1) * fb.h);
@@ -61,3 +67,15 @@ if (fb) {
   fs.writeFileSync(pngPath, png);
   console.log(`== screen ${fb.w}x${fb.h} saved to ${pngPath}`);
 } else console.log('== no framebuffer configured yet');
+}
+savePng(pngPath);
+const taps = opt('--tap', null);
+if (taps) taps.split(';').forEach((xy, k) => {
+  const [x, y] = xy.split(',').map(Number);
+  const SYS = 0x40544E68, before = m.readBytes(SYS, 0x1000);
+  m.dev.touch.event('down', x, y); m.boot(30e6); m.dev.touch.event('up', x, y); m.boot(150e6);
+  const after = m.readBytes(SYS, 0x1000), diff = [];
+  for (let i = 0; i < 0x1000; i++) if (before[i] !== after[i] && diff.length < 40) diff.push(`+0x${i.toString(16)}:${before[i]}->${after[i]}`);
+  console.log(`== tap ${k} (${x},${y}) SYS changes: ${diff.join(' ')}`);
+  savePng(pngPath.replace(/.png$/, `_tap${k}.png`));
+});

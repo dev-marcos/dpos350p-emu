@@ -1,6 +1,8 @@
 // Peripheral models (port of devices.py). Register meanings follow the V3s user manual (DERIVED);
 // what the stock firmware expects from them was read from its code (docs/DRIVERS.md in the decomp repo).
 
+import { calibrationBlob, CAL_STORAGE, CAL_OBJECT } from './calibration.js';
+
 export const CCU = 0x01C20000;
 export const TMR = 0x01C20C00;
 export const UART = [0x01C28000, 0x01C28400, 0x01C28800];
@@ -13,6 +15,8 @@ export class Board {
     this.ticks = 0;                              // 24 MHz OSC ticks
     this.ticksPerInsn = 0.5;                     // emulated time per instruction (ASSUMPTION, tunable)
     this.flash = new SpiFlash();
+    // channel calibration in the settings area (blank on a fresh emulated flash; see calibration.js)
+    if (!m.opts || m.opts.calibration !== false) this.flash.mem.set(calibrationBlob(), CAL_STORAGE);
     this.spi0 = new Spi(this.flash);
     this.sd = new SdCard(m.sdImage);
     this.mmc0 = new Mmc(this.sd, m);
@@ -397,22 +401,31 @@ export class Csi {                               // CSI0: FPGA sample stream -> 
   }
 }
 
-export class FrontEnd {                          // virtual analog front end + probes (ASSUMPTIONS, see devices.py)
+export class FrontEnd {
+  // Virtual analog front end + probes. It produces the ADC codes that the firmware's calibrated
+  // conversion (calibration.js) turns into the wanted screen position:
+  //   position_px = offset_px + volts_at_input / (V/div) * px_per_div
+  // using the live per-lane coefficients, the V/div gain table and the conversion parameters, so the
+  // trace and the measurements follow the firmware's own settings. ASSUMPTIONS: the V/div table
+  // below, 8 vertical divisions, all lanes sampling the same instant.
   static SYS = 0x40544E68;
+  static VDIV = [20, 10, 5, 2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002];   // DERIVED: index 6 shows 200mV, 5 shows 500mV
   constructor(m) {
     this.m = m;
-    this.GAIN = 0.05; this.CODES_PER_VOLT = 25.0; this.SAMPLE_RATE = 100e6;
+    this.SAMPLE_RATE = 250e6;                    // total sample rate, all 8 interleaved lanes (ASSUMPTION: the 250 MS/s shown at 20 us/div)
+    this.LANES = 8;
     this.ch = [
       { on: true, wave: 'sine', freq: 1000, vpp: 2, offset: 0, probe: 1, source: 'gen' },
       { on: true, wave: 'square', freq: 500, vpp: 1, offset: 0, probe: 1, source: 'gen' },
     ];
     this.audio = new Float32Array(0);
     this.audioVolts = 1.0;
-    this.t0 = 0;
+    this.audioRate = 48000;                      // samples per second of the pushed audio (set by the page)
+    this.halfSpan = 0;
     this.out = new Uint8Array(6144);
     this.seed = 1;
   }
-  u(off, n) { const a = FrontEnd.SYS + off; return n === 1 ? this.m.r8(a) : n === 2 ? this.m.r16(a) : this.m.r32(a) >>> 0; }
+  u(off, n) { const a = FrontEnd.SYS + off; return n === 1 ? this.m.r8(a) : n === 2 ? this.m.r16(a) : this.m.r32(a) | 0; }
   pushAudio(samples) {
     const keep = 1 << 16;
     const a = new Float32Array(Math.min(keep, this.audio.length + samples.length));
@@ -420,42 +433,56 @@ export class FrontEnd {                          // virtual analog front end + p
     a.set(old, 0); a.set(samples.subarray(Math.max(0, samples.length - a.length)), old.length);
     this.audio = a;
   }
+  // volts at the probe tip for sample i of this frame
+  // t: seconds from the trigger point
+  volts(p, t, j) {
+    if (!p.on) return 0;
+    if (p.source === 'audio' && this.audio.length) { const k = this.audio.length - 1 - Math.round((this.halfSpan - t) * this.audioRate); return (k >= 0 && k < this.audio.length ? this.audio[k] : 0) * this.audioVolts; }
+    const ph = (((t * p.freq) % 1) + 1) % 1;
+    let s;
+    switch (p.wave) {
+      case 'square': s = ph < 0.5 ? 1 : -1; break;
+      case 'triangle': s = 4 * Math.abs(ph - 0.5) - 1; break;
+      case 'saw': s = 2 * ph - 1; break;
+      case 'dc': s = 1; break;
+      case 'noise': this.seed = (Math.imul(this.seed, 1103515245) + 12345) >>> 0; s = (this.seed / 2147483648) - 1; break;
+      default: s = Math.sin(2 * Math.PI * ph);
+    }
+    return s * p.vpp / 2 + p.offset;
+  }
   samples(slot, frame, n = 6144) {
     const on = [this.u(0x3E, 1) !== 0, this.u(0x102, 1) !== 0];
     const c = ((on[0] && on[1] && slot >= 4) || (on[1] && !on[0])) ? 1 : 0;
-    const centre = this.u(0x0E, 2);
-    const dac = this.u(c === 0 ? 0x60 : 0x120, 4);
-    const d44 = this.u(0x44, 2);
-    const off = centre ? (dac - centre) * this.GAIN : 0;
-    const base = d44 >= 3000 ? Math.floor((d44 - 3000) * 256 / 7000) + off : 128 + off;
     const p = this.ch[c];
     const out = this.out;
-    const k = this.CODES_PER_VOLT / Math.max(1, p.probe);
+    const vidx = this.u(c ? 0x105 : 0x41, 1);
+    const gain = this.u((c ? 0x214 : 0x1C4) + 4 * vidx, 4);
+    const A = this.m.r32(CAL_OBJECT + 0x10 + 4 * slot) | 0, B = this.m.r32(CAL_OBJECT + 0x30 + 4 * slot) | 0;
+    const ip = Math.trunc(Math.imul(gain, A) / 1000);
+    const unit = this.u(0x1C0, 4) || 64, shift = this.u(0x264, 4) & 31, base = this.u(0x1B8, 1);
+    const offPx = this.u(c ? 0x120 : 0x60, 4);
+    const pxPerDiv = (this.u(0x0A, 2) || 503) / 8;
+    const vdiv = FrontEnd.VDIV[vidx] || 1;
+    const d44 = this.u(0x44, 2);
+    const k = pxPerDiv / vdiv / Math.max(1, p.probe);
+    // The 8 lanes are interleaved ADC phases: byte i of lane L is sample 8*i + L. The FPGA triggers
+    // the capture: the rising crossing of the generator's mean level sits at the middle of the
+    // frame (ASSUMPTION: 50 % pre-trigger, generator phase 0 = trigger).
+    const dt = 1 / this.SAMPLE_RATE, mid = (n * this.LANES) / 2;
+    this.halfSpan = mid * dt;
+    const phase0 = p.wave === 'sine' ? 0 : p.wave === 'saw' ? 0.5 : p.wave === 'triangle' ? 0.75 : 0;
     for (let i = 0; i < n; i++) {
-      let v = 0;
-      if (p.on) {
-        if (p.source === 'audio' && this.audio.length) {
-          const j = this.audio.length - n + i;
-          v = (j >= 0 ? this.audio[j] : 0) * this.audioVolts;
-        } else {
-          const t = this.t0 + i / this.SAMPLE_RATE;
-          const ph = (t * p.freq) % 1;
-          let s;
-          switch (p.wave) {
-            case 'square': s = ph < 0.5 ? 1 : -1; break;
-            case 'triangle': s = 4 * Math.abs(ph - 0.5) - 1; break;
-            case 'saw': s = 2 * ph - 1; break;
-            case 'dc': s = 1; break;
-            case 'noise': this.seed = (Math.imul(this.seed, 1103515245) + 12345) >>> 0; s = (this.seed / 2147483648) - 1; break;
-            default: s = Math.sin(2 * Math.PI * ph);
-          }
-          v = s * p.vpp / 2 + p.offset;
-        }
-      }
-      const code = Math.round(base + v * k);
+      let code;
+      const idx = i * this.LANES + slot;
+      const t = (idx - mid) * dt + phase0 / Math.max(p.freq, 1e-9);
+      if (d44 >= 3000) code = Math.floor((d44 - 3000) * 256 / 7000);          // POST ADC test: the swept DAC drives the codes
+      else if (ip > 0) {
+        const px = offPx + this.volts(p, t, n * this.LANES - idx) * k;
+        code = base + (px * unit * Math.pow(2, shift) - B) / ip;
+      } else code = 128 + this.volts(p, t, n * this.LANES - idx) * k / 2.5;      // no usable calibration
+      code = Math.round(code);
       out[i] = code < 0 ? 0 : code > 255 ? 255 : code;
     }
-    if (slot === 7) this.t0 += n / this.SAMPLE_RATE;
     return out.subarray(0, n);
   }
 }

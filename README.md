@@ -27,6 +27,7 @@ node tests/serve.mjs            # then open http://localhost:8351
 | Runs the machine off the UI thread; snapshots; file manager | `web/core/worker.js` |
 | FAT12/16/32 read/write, FAT32 format | `web/core/fat.js` |
 | `.iso` container → `app.bin` | `web/core/iso.js` |
+| Synthetic channel calibration (SPI flash 0x1FB000) and the conversion it feeds | `web/core/calibration.js` |
 | Page: device frame, screen, tabs Arquivos / Canais / Sistema / Dev | `web/index.html`, `web/app.js`, `web/style.css`, `web/frame.svg` |
 
 The firmware's MMU tables map every address to itself, so the core uses flat memory.
@@ -41,7 +42,8 @@ decomp repository root:
 ```
 python3 tools/sim/tests/gen_cpu_cases.py      # inside the dpos-re WSL distro (needs unicorn + capstone)
 node tools/sim/tests/cpu_test.mjs             # expected: 0 failed
-node tools/sim/tests/boot.mjs --insns 1700M   # headless boot to the main screen -> build/sim/js_screen.png
+node tools/sim/tests/boot.mjs --insns 1700M --ch1 freq=20000,vpp=1   # headless boot -> build/sim/js_screen.png
+                                              # --tap "x,y;x,y" taps the screen afterwards and prints SYS_INFO changes
 ```
 
 IT instructions are left out of the comparison: Unicorn runs a whole IT block as one step.
@@ -54,8 +56,13 @@ repository). It stays as the reference for the JavaScript port.
 
 ## Known limits
 
-- No live trace yet. The samples reach the firmware, but its measurement chain needs the
-  calibration tables that a real unit keeps in SPI flash. The emulated flash starts blank.
+- The channel calibration is synthetic (`web/core/calibration.js`): a real unit keeps it in SPI flash
+  at 0x1FB000. Without it the firmware's conversion yields a constant (flat trace, -796 mV). The
+  front end produces the ADC codes that this calibration converts into the wanted screen position, so
+  amplitudes and measurements follow the V/div setting (checked: 1 Vpp sine reads VPP 1 V, RMS 352 mV).
+- OPEN: the drawn time axis spans about 21 % less than 12 x time/div, while the firmware's frequency
+  measurement agrees with the 250 MS/s generator (20 kHz reads 19 kHz).
+- OPEN: the CH2 "Channel enable" switch does not toggle with emulated touches yet.
 - The volts → ADC code conversion is an assumption until the front-end gain chain is
   reverse-engineered.
 - Emulated time runs at 0.5 oscillator tick per instruction, about 48 M instructions per emulated
