@@ -82,6 +82,7 @@ function status() {
     irqs: m.irqs, csiFrames: d.csi.frames, pc: m.sym(m.cpu.pc), image: appInfo, batteryMv: d.batteryMv, charging: d.charging,
     factoryDone: opts.factoryDone, channels: d.frontend.ch, audioVolts: d.frontend.audioVolts, touchReads: d.touch.reads,
     speed, emuSeconds: +(m.cpu.insns / INSNS_PER_SECOND).toFixed(1), sdDirty, gen: readGen(m),
+    scopeCh: [m.r8(0x40544E68 + 0x3E) !== 0, m.r8(0x40544E68 + 0x102) !== 0],   // channel enables in SYS_INFO
   };
 }
 

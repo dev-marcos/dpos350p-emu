@@ -96,6 +96,8 @@ function renderStatus() {
   $("#charging").checked = !!s.charging;
   if (s.factoryDone !== undefined) $("#factory").checked = s.factoryDone;
   if (!chBuilt && s.channels) buildChannels(s.channels);
+  // CH1/CH2 tags: coloured while the channel is on in the scope, grey when off (as the scope's bottom bar)
+  if (s.scopeCh) s.scopeCh.forEach((on, i) => { const el = document.getElementById('chTag' + i); if (el) el.classList.toggle('off', !on); });
   if (s.sdDirty) saveSdSoon();
   if (s.gen) setGen(s.gen);
 }
@@ -167,7 +169,7 @@ const PROBES = [1, 10, 100];
 function buildChannels(chs) {
   chBuilt = true;
   $("#chForms").innerHTML = chs.map((c, i) => `
-    <fieldset class="card ch${i + 1}"><legend>CH${i + 1}</legend>
+    <fieldset class="card ch${i + 1}"><legend><span class="tag ch${i + 1}" id="chTag${i}">CH${i + 1}</span></legend>
       <div class="grid2">
         <span>${t("ch.on")}</span><label><input type="checkbox" data-ch="${i}" data-k="on" ${c.on ? "checked" : ""}> ${t("ch.onLabel")}</label>
         <span>${t("ch.source")}</span><select data-ch="${i}" data-k="source"><option value="gen">${t("ch.gen")}</option><option value="audio">${t("ch.audio")}</option><option value="device">${t("ch.device")}</option></select>
