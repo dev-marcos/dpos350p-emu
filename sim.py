@@ -129,7 +129,9 @@ class Sim:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", default=str(ROOT / "build/extract/app.bin"))
-    ap.add_argument("--insns", default="20M")
+    ap.add_argument("--insns", default="800M")
+    ap.add_argument("--screenshot", default=str(ROOT / "build/sim/screen.png"),
+                    help="PNG of the emulated display at the end of the run")
     ap.add_argument("--trace-mmio", action="store_true")
     ap.add_argument("--sd", help="SD card image (raw); default: blank 64 MiB")
     a = ap.parse_args()
@@ -137,6 +139,9 @@ def main():
     sd = bytearray(Path(a.sd).read_bytes()) if a.sd else None
     sim = Sim(Path(a.image).read_bytes(), a.trace_mmio, sd)
     res = sim.boot(n)
+    Path(a.screenshot).parent.mkdir(parents=True, exist_ok=True)
+    info = screenshot(sim, a.screenshot)
+    print(f"== screen ({info['w']}x{info['h']}) saved to {a.screenshot}")
     print(f"\n== ran {res['insns'] / 1e6:.1f} M instructions in {res['seconds']:.1f} s; pc = {res['pc']}")
     if res["error"]:
         print(f"== stopped: {res['error']}")
@@ -156,8 +161,6 @@ def main():
         print("== UART output:\n" + out)
 
 
-if __name__ == "__main__":
-    sys.exit(main())
 
 
 def screenshot(sim, path):
@@ -176,3 +179,7 @@ def screenshot(sim, path):
             px[x, y] = ((v >> 11) << 3, ((v >> 5) & 0x3F) << 2, (v & 0x1F) << 3)
     img.save(path)
     return {"attr": hex(attr), "w": w, "h": h, "pitch": pitch, "addr": hex(addr), "fmt": fmt}
+
+
+if __name__ == "__main__":
+    sys.exit(main())
