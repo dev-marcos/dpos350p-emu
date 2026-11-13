@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Emulador DSO-350</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">Emulador <b>DSO-350</b> <span class="muted">firmware 2025-06-19</span></div>
+  <div class="controls">
+    <button id="btnRun" title="Pausar / continuar">⏸ Pausar</button>
+    <button id="btnReset" title="Reiniciar o aparelho (liga de novo)">⟲ Reiniciar</button>
+    <button id="btnShot" title="Salvar a tela como PNG">⤓ Tela</button>
+    <span id="stat" class="stat">—</span>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="stage">
+    <div class="device" id="device">
+      <img class="frame" src="frame.svg" alt="" draggable="false">
+      <img class="screen" id="screen" src="frame.png" alt="tela do emulador" draggable="false">
+      <div class="drop" id="drop" hidden>Solte aqui o firmware (.iso ou app.bin)</div>
+    </div>
+    <p class="hint">Clique e arraste na tela para tocar. Arraste um arquivo de firmware sobre o aparelho para carregá-lo.</p>
+  </section>
+
+  <aside class="panel">
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="files">Arquivos</button>
+      <button class="tab" data-tab="channels">Canais</button>
+      <button class="tab" data-tab="system">Sistema</button>
+      <button class="tab" data-tab="dev">Dev</button>
+    </nav>
+
+    <!-- ARQUIVOS (cartão SD) -->
+    <div class="pane active" id="pane-files">
+      <div class="row between">
+        <div class="crumbs" id="crumbs">/</div>
+        <div class="row gap">
+          <button id="fsUp" title="Pasta acima">↑</button>
+          <button id="fsRefresh" title="Atualizar">⟳</button>
+          <button id="fsMkdir" title="Nova pasta">＋📁</button>
+          <button id="fsFormat" title="Formatar o cartão emulado (FAT32)">Formatar</button>
+          <label class="btn" title="Enviar arquivo para o cartão">⤒ Enviar<input type="file" id="fsUpload" multiple hidden></label>
+        </div>
+      </div>
+      <table class="files"><thead><tr><th>Nome</th><th class="r">Tamanho</th><th>Data</th><th></th></tr></thead>
+        <tbody id="fsList"></tbody></table>
+      <p class="note" id="fsNote">Cartão SD emulado (64 MB). Na primeira execução o firmware o formata sozinho. Depois de enviar ou apagar arquivos, use <b>Reiniciar</b> para o firmware enxergar a mudança.</p>
+    </div>
+
+    <!-- CANAIS -->
+    <div class="pane" id="pane-channels">
+      <div id="chForms"></div>
+      <fieldset class="card">
+        <legend>Entrada de áudio do computador</legend>
+        <div class="row gap wrap">
+          <select id="audioDev"><option value="">(liberar o microfone para listar)</option></select>
+          <button id="audioStart">▶ Capturar</button>
+          <button id="audioStop" disabled>■ Parar</button>
+        </div>
+        <label class="row gap">Fundo de escala = <input id="audioVolts" type="number" value="1" step="0.1" min="0.01" class="num"> V</label>
+        <p class="note">Escolha "Áudio" como fonte em um canal para injetar o sinal capturado (microfone, entrada de linha ou cabo virtual).</p>
+        <div class="meter"><div id="audioLevel"></div></div>
+      </fieldset>
+      <p class="note warn">A conversão volts → código do ADC ainda é uma aproximação (o ganho real por V/div está em engenharia reversa). A forma, a frequência e as proporções valem; a escala absoluta ainda não.</p>
+    </div>
+
+    <!-- SISTEMA -->
+    <div class="pane" id="pane-system">
+      <fieldset class="card">
+        <legend>Firmware</legend>
+        <div id="fwInfo" class="kv"></div>
+        <label class="btn wide">Carregar firmware (.iso ou app.bin)<input type="file" id="fwFile" accept=".iso,.bin" hidden></label>
+        <p class="note">O arquivo fica só no seu computador (build/sim/). Nada é enviado para fora.</p>
+      </fieldset>
+      <fieldset class="card">
+        <legend>Bateria</legend>
+        <label class="row gap">Tensão <input type="range" id="batt" min="3300" max="4300" step="10"> <span id="battV" class="mono"></span></label>
+        <label class="row gap"><input type="checkbox" id="charging"> Carregando</label>
+      </fieldset>
+      <fieldset class="card">
+        <legend>Inicialização</legend>
+        <label class="row gap"><input type="checkbox" id="factory" checked> Processo de fábrica concluído (pula o autoteste e o modo "insira o testador")</label>
+        <p class="note">Vale no próximo <b>Reiniciar</b>.</p>
+      </fieldset>
+      <fieldset class="card">
+        <legend>Estado salvo</legend>
+        <div class="row gap"><button id="snapSave">Salvar estado</button><button id="snapLoad">Restaurar estado</button><button id="sdSave">Gravar cartão SD</button></div>
+      </fieldset>
+    </div>
+
+    <!-- DEV -->
+    <div class="pane" id="pane-dev">
+      <div class="row gap"><label class="row gap"><input type="checkbox" id="devAuto" checked> Atualizar</label></div>
+      <h4>Execução</h4><div id="devExec" class="kv"></div>
+      <h4>Interrupções</h4><div id="devIrq" class="kv"></div>
+      <h4>FPGA (leituras por seletor)</h4><div id="devFpga" class="chips"></div>
+      <h4>Periféricos sem modelo</h4>
+      <table class="files small"><thead><tr><th>Op</th><th>Endereço</th><th class="r">Vezes</th><th>Primeira função</th></tr></thead><tbody id="devMmio"></tbody></table>
+      <h4>Onde o tempo vai</h4><div id="devHot" class="mono small"></div>
+      <h4>UART</h4><pre id="devUart" class="log"></pre>
+    </div>
+  </aside>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

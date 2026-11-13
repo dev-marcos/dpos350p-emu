@@ -1,0 +1,153 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 680" width="1000" height="680">
+  <!--
+    Frame de osciloscópio portátil para emulador web (v2, redesenhado do zero).
+    ÁREA DA TELA: x=90 y=80 w=820 h=480 (proporção 1024x600)
+      em %: left 9%  top 11.765%  width 82%  height 70.588%
+    Use o <foreignObject id="screen"> ou sobreponha seu app via CSS com as % acima.
+  -->
+  <defs>
+    <!-- silhueta octogonal (cantos chanfrados) -->
+    <clipPath id="body">
+      <path d="M44 4 H956 L996 44 V636 L956 676 H44 L4 636 V44 Z"/>
+    </clipPath>
+
+    <!-- face larga da lateral: metal cinza, mais escuro por fora -->
+    <linearGradient id="sideFaceL" x1="0" x2="1">
+      <stop offset="0" stop-color="#3c3f44"/>
+      <stop offset="0.35" stop-color="#6b6f75"/>
+      <stop offset="0.8" stop-color="#8e9298"/>
+      <stop offset="1" stop-color="#9da1a7"/>
+    </linearGradient>
+    <linearGradient id="sideFaceR" x1="1" x2="0">
+      <stop offset="0" stop-color="#3c3f44"/>
+      <stop offset="0.35" stop-color="#6b6f75"/>
+      <stop offset="0.8" stop-color="#8e9298"/>
+      <stop offset="1" stop-color="#9da1a7"/>
+    </linearGradient>
+    <!-- filete brilhante (aresta polida) -->
+    <linearGradient id="edgeHi" x1="0" x2="1">
+      <stop offset="0" stop-color="#cfd2d6"/>
+      <stop offset="0.5" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#b9bcc1"/>
+    </linearGradient>
+    <!-- leve variação vertical sobre o metal -->
+    <linearGradient id="sideShade" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="#000" stop-opacity="0.35"/>
+      <stop offset="0.12" stop-color="#000" stop-opacity="0"/>
+      <stop offset="0.88" stop-color="#000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0.35"/>
+    </linearGradient>
+
+    <linearGradient id="topBezel" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="#4a4d53"/>
+      <stop offset="1" stop-color="#1c1d21"/>
+    </linearGradient>
+    <linearGradient id="bottomBezel" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="#26282c"/>
+      <stop offset="1" stop-color="#3e4147"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="#202226"/>
+      <stop offset="1" stop-color="#0e0f12"/>
+    </linearGradient>
+    <linearGradient id="glare" x1="0" x2="0.6" y1="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.06"/>
+      <stop offset="0.4" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+
+    <linearGradient id="blue" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#4f97ea"/>
+      <stop offset="1" stop-color="#1f5fb8"/>
+    </linearGradient>
+    <linearGradient id="bnc" x1="0" x2="1">
+      <stop offset="0" stop-color="#6c7077"/>
+      <stop offset="0.5" stop-color="#e9ebee"/>
+      <stop offset="1" stop-color="#5f636a"/>
+    </linearGradient>
+
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="115%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+
+    <!-- borracha de canto (superior esquerdo); as outras são espelhos -->
+    <g id="cap">
+      <path d="M120 11 H46 L11 46 V120" fill="none" stroke="#163f7d" stroke-width="15" stroke-linejoin="miter"/>
+      <path d="M120 11 H46 L11 46 V120" fill="none" stroke="url(#blue)" stroke-width="12.5" stroke-linejoin="miter"/>
+      <path d="M119 5.5 H44 L5.5 44 V119" fill="none" stroke="#9cc6ff" stroke-opacity="0.55" stroke-width="1.2"/>
+    </g>
+  </defs>
+
+  <!-- conectores BNC no topo -->
+  <g id="bnc-connectors">
+    <rect x="330" y="0" width="46" height="10" rx="3" fill="url(#bnc)"/>
+    <rect x="477" y="0" width="46" height="10" rx="3" fill="url(#bnc)"/>
+    <rect x="624" y="0" width="46" height="10" rx="3" fill="url(#bnc)"/>
+  </g>
+
+  <g id="device" filter="url(#shadow)">
+    <g clip-path="url(#body)">
+      <!-- corpo base -->
+      <rect x="0" y="0" width="1000" height="680" fill="#18191c"/>
+
+      <!-- bisel superior e inferior -->
+      <rect x="0" y="0" width="1000" height="18" fill="url(#topBezel)"/>
+      <rect x="0" y="654" width="1000" height="26" fill="url(#bottomBezel)"/>
+
+      <!-- LATERAL ESQUERDA -->
+      <path d="M4 62 L42 24 V656 L4 618 Z" fill="url(#sideFaceL)"/>
+      <path d="M4 62 L42 24 V656 L4 618 Z" fill="url(#sideShade)"/>
+      <path d="M42 24 L49 18 V662 L42 656 Z" fill="url(#edgeHi)"/>
+      <line x1="49.5" y1="18" x2="49.5" y2="662" stroke="#0a0a0c" stroke-width="1.5"/>
+
+      <!-- LATERAL DIREITA -->
+      <path d="M996 62 L958 24 V656 L996 618 Z" fill="url(#sideFaceR)"/>
+      <path d="M996 62 L958 24 V656 L996 618 Z" fill="url(#sideShade)"/>
+      <path d="M958 24 L951 18 V662 L958 656 Z" fill="url(#edgeHi)"/>
+      <line x1="950.5" y1="18" x2="950.5" y2="662" stroke="#0a0a0c" stroke-width="1.5"/>
+
+      <!-- painel frontal de vidro -->
+      <rect x="51" y="18" width="898" height="636" fill="url(#glass)"/>
+      <line x1="51" y1="18.5" x2="949" y2="18.5" stroke="#55585e" stroke-width="1"/>
+      <line x1="51" y1="653.5" x2="949" y2="653.5" stroke="#000" stroke-width="1"/>
+    </g>
+
+    <!-- borrachas azuis nos 4 cantos -->
+    <use href="#cap"/>
+    <use href="#cap" transform="translate(1000 0) scale(-1 1)"/>
+    <use href="#cap" transform="translate(0 680) scale(1 -1)"/>
+    <use href="#cap" transform="translate(1000 680) scale(-1 -1)"/>
+  </g>
+
+  <!-- moldura interna da tela -->
+  <rect x="85" y="75" width="830" height="490" rx="3" fill="#050506" stroke="#2a2c31" stroke-width="1"/>
+
+  <!-- ÁREA DA TELA: o emulador roda aqui (a página sobrepõe a imagem com as % acima) -->
+  <rect id="screen-bg" x="90" y="80" width="820" height="480" fill="#000"/>
+
+  <!-- marca fictícia -->
+  <g id="brand-logo" transform="translate(92 37)">
+    <defs>
+      <linearGradient id="logoMetal" x1="0" x2="0" y1="0" y2="1">
+        <stop offset="0" stop-color="#f2f3f5"/>
+        <stop offset="1" stop-color="#a9adb3"/>
+      </linearGradient>
+    </defs>
+    <text x="0" y="24" font-family="'Segoe UI', Roboto, Arial, sans-serif" font-size="27"
+          font-weight="300" letter-spacing="7" fill="url(#logoMetal)">FIRST</text>
+    <rect x="0" y="31" width="22" height="2.5" fill="#2f78d6"/>
+  </g>
+
+  <!-- selo do modelo (edite à vontade) -->
+  <g id="model-badge" transform="translate(760 38)">
+    <path d="M0 22 L10 4 H20 L10 22 Z M14 22 L24 4 H34 L24 22 Z M28 22 L38 4 H48 L38 22 Z" fill="#2f78d6"/>
+    <text x="56" y="20" font-family="'Segoe UI', Roboto, Arial, sans-serif" font-size="17"
+          font-style="italic" font-weight="600" fill="#d7dade">DSO-350</text>
+    <line x1="56" y1="26" x2="150" y2="26" stroke="#d7dade" stroke-width="1"/>
+  </g>
+  <text id="model-label" x="910" y="612" text-anchor="end"
+        font-family="'Segoe UI', Roboto, Arial, sans-serif" font-size="22"
+        letter-spacing="1" fill="#c9ccd1">350MHz  1GSa/s</text>
+
+  <!-- reflexo do vidro -->
+  <rect x="51" y="18" width="898" height="636" fill="url(#glare)" pointer-events="none"/>
+</svg>

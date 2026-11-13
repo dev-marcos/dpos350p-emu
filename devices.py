@@ -10,13 +10,21 @@ class Board:
     def __init__(self, sim):
         self.sim = sim
         self.uart = [bytearray() for _ in UART]
-        self.ticks = 0                 # 24 MHz OSC ticks; one per emulated instruction (approximation)
+        self.ticks = 0                 # 24 MHz OSC ticks
+        # emulated time per instruction: 0.5 OSC tick (~48 M instructions per emulated second, close to
+        # the emulator's real speed, so the UI runs at about real time). ASSUMPTION, tunable.
+        self.ticks_per_insn = 0.5
         self.flash = SpiFlash()
         self.spi0 = Spi(0x01C68000, self.flash)
         self.sd = SdCard(sim.sd_image)
         self.mmc0 = Mmc(self.sd, sim)
         self.fpga = Fpga()
+        self.fpga.board = self
         self.pe_dat = 0
+        # battery: LRADC DATA0 (0x01C2280C, 6 bits). The firmware converts the averaged code with
+        # its default coefficients: mV = 32.947 * code + 2565.74 + 170 (read at run time).
+        self.battery_mv = 4100
+        self.charging = False
         self.gic = Gic()
         self.timers = Timers(sim, self.gic)
         self.touch = Gt911()
@@ -24,7 +32,12 @@ class Board:
         self.csi = Csi(sim, self.gic, self.frontend)
 
     # returns the value to read, or None (unmodelled: RAM-backed, logged)
+    def lradc_code(self):
+        return max(0, min(63, round((self.battery_mv - 2735.74) / 32.947)))
+
     def read(self, addr, size):
+        if addr == 0x01C2280C:
+            return self.lradc_code()
         if 0x01C81000 <= addr < 0x01C83000:
             return self.gic.read(addr)
         if Csi.BASE <= addr < Csi.BASE + 0x1000:
@@ -103,7 +116,7 @@ class Board:
 
     def tick(self, n):
         """n instructions elapsed. Assumption: ~1e9 instructions/s, OSC 24 MHz -> 0.024 tick per insn."""
-        t = max(1, n * 24 // 1000)
+        t = max(1, int(n * self.ticks_per_insn))
         self.ticks += t
         self.timers.advance(t)
         self.csi.advance(n)
@@ -451,6 +464,8 @@ class Fpga:
         if s == 0x01:                         # identity: A5 A5 5A 5A (checked by the ID probe)
             v = (0xA5, 0xA5, 0x5A, 0x5A)[self.idx % 4]
             self.idx += 1
+        elif s == 0x02:                       # charger status: bit 0 = charging (Hack FPGA_PROTOCOL)
+            v = 1 if getattr(getattr(self, "board", None), "charging", False) else 0
         elif s == 0x0A:                       # acquisition status: bit 0 = complete (Hack FPGA_PROTOCOL)
             v = 0x01
         elif s == 0x60:                       # security-chip status (POST check reads bit 0)
@@ -581,19 +596,70 @@ class Csi:
 
 
 class FrontEnd:
-    """Virtual analog front end + probe. ADC code = offset from the DC-offset DAC (SYS_INFO+0x44:
-    the POST ADC test sweeps it 3000..~10000 and expects the codes to ramp through every bit)
-    plus the probe signal (a sine; amplitude in codes)."""
-    def __init__(self, sim, amplitude=50, period=512):
-        self.sim, self.amplitude, self.period = sim, amplitude, period
-        import math
-        self.wave = [math.sin(2 * math.pi * i / period) for i in range(6144)]
+    """Virtual analog front end + probes (ASSUMPTIONS marked; the real gain chain is OPEN).
+
+    ADC code of a channel = offset term + global DAC sweep term + probe signal:
+      * offset term: (channel offset DAC - centre) * GAIN; CH1 offset SYS_INFO+0x60, CH2 +0x120,
+        centre SYS_INFO+0x0E (the POST channel-multiplex test moves them in opposite directions)
+      * POST ADC test (SYS_INFO+0x44 >= 3000): (SYS_INFO+0x44 - 3000) * 256 / 7000 replaces mid-scale 128
+      * signal: volts at the probe tip / probe attenuation (1x or 10x) * CODES_PER_VOLT
+    Slots: CH1 and CH2 on -> slots 0..3 CH1, 4..7 CH2 (Hack FPGA.md); one channel -> all slots.
+    """
+    SYS = 0x40544E68
+    GAIN = 0.05                 # codes per offset-DAC step (ASSUMPTION)
+    CODES_PER_VOLT = 25.0       # at the ADC input (ASSUMPTION until the V/div chain is known)
+    SAMPLE_RATE = 100e6         # samples per second per slot (ASSUMPTION)
+
+    def __init__(self, sim):
+        self.sim = sim
+        self.ch = [dict(on=True, wave="sine", freq=1000.0, vpp=2.0, offset=0.0, probe=1, source="gen"),
+                   dict(on=True, wave="square", freq=500.0, vpp=1.0, offset=0.0, probe=1, source="gen")]
+        self.audio = []          # float samples in [-1, 1] pushed by the web UI (microphone / line in)
+        self.audio_volts = 1.0   # volts for full-scale audio
+        self.t0 = 0.0            # phase continuity between frames
+
+    # --- helpers
+    def _u(self, off, n):
+        return int.from_bytes(self.sim.uc.mem_read(self.SYS + off, n), "little")
+
+    def _signal(self, c, n, t0):
+        import numpy as np
+        p = self.ch[c]
+        t = t0 + np.arange(n) / self.SAMPLE_RATE
+        if p["source"] == "audio" and self.audio:
+            a = np.array(self.audio[-n:], dtype=float)
+            a = np.pad(a, (n - len(a), 0)) if len(a) < n else a
+            v = a * self.audio_volts
+        else:
+            ph = (t * p["freq"]) % 1.0
+            w = p["wave"]
+            if w == "square": v = np.where(ph < 0.5, 1.0, -1.0)
+            elif w == "triangle": v = 4 * np.abs(ph - 0.5) - 1
+            elif w == "saw": v = 2 * ph - 1
+            elif w == "dc": v = np.ones(n)
+            elif w == "noise": v = np.random.default_rng(int(t0 * 1e6) & 0xFFFF).uniform(-1, 1, n)
+            else: v = np.sin(2 * np.pi * ph)
+            v = v * p["vpp"] / 2 + p["offset"]
+        return v / max(1, p["probe"]) * self.CODES_PER_VOLT
 
     def __call__(self, slot, frame, n=6144):
-        dac = int.from_bytes(self.sim.uc.mem_read(0x40544E68 + 0x44, 2), "little")
-        base = (dac - 3000) * 256 // 7000
-        a = self.amplitude
-        return bytes(max(0, min(255, base + int(a * self.wave[i]))) for i in range(n))
+        import numpy as np
+        on = [self._u(0x3E, 1) != 0, self._u(0x102, 1) != 0]
+        c = 1 if (on[0] and on[1] and slot >= 4) or (on[1] and not on[0]) else 0
+        centre = self._u(0x0E, 2)
+        dac = self._u(0x60 if c == 0 else 0x120, 4)
+        d44 = self._u(0x44, 2)
+        off = (dac - centre) * self.GAIN if centre else 0
+        if d44 >= 3000:          # POST ADC test: the swept DAC drives the whole code range
+            base = (d44 - 3000) * 256 // 7000 + off
+        else:                    # normal operation: mid-scale plus the channel offset
+            base = 128 + off
+        sig = self._signal(c, n, self.t0) if self.ch[c]["on"] else 0
+        if slot == 7:
+            self.t0 += n / self.SAMPLE_RATE
+        codes = np.clip(np.rint(base + sig), 0, 255).astype(np.uint8)
+        return codes.tobytes()
+
 
 
 class Gt911:
@@ -609,18 +675,29 @@ class Gt911:
         self.release_pending = False
         self.track = 0
         self.reads = 0
+        self.down_reads = 0
+        self.release_wanted = False
 
     def event(self, kind, x, y):
         if kind in ("down", "move"):
             if kind == "down":
                 self.track = (self.track + 1) & 0x0F
+                self.down_reads = 0
             self.down, self.x, self.y = True, max(0, x), max(0, y)
+            self.release_wanted = False
         else:
-            self.down = False
-            self.release_pending = True
+            # a quick click must be seen: keep the point until the firmware has read it twice
+            self.release_wanted = True
+            if self.down_reads >= 2:
+                self.down = False
+                self.release_pending = True
 
     def _refresh(self):
+        if self.down and self.release_wanted and self.down_reads >= 2:
+            self.down = False
+            self.release_pending = True
         if self.down:
+            self.down_reads += 1
             self.regs[0x814E] = 0x81                       # buffer ready, 1 point
             self.regs[0x814F] = self.track
             self.regs[0x8150:0x8152] = self.x.to_bytes(2, "little")

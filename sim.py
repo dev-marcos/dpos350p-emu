@@ -40,7 +40,7 @@ def load_symbols():
 
 
 class Sim:
-    def __init__(self, image, trace_mmio=False, sd_image=None, bypass_calibration=False):
+    def __init__(self, image, trace_mmio=False, sd_image=None, bypass_calibration=False, factory_done=True):
         self.sd_image = sd_image if sd_image is not None else bytearray(64 << 20)   # blank 64 MiB card
         uc = Uc(UC_ARCH_ARM, UC_MODE_ARM)
         try:
@@ -79,6 +79,16 @@ class Sim:
         self.bypass_calibration = bypass_calibration
         if bypass_calibration:
             uc.hook_add(UC_HOOK_CODE, lambda u, a, sz, d: u.mem_write(0x42E68B01, b""), None, 0x400513DC, 0x400513DC)
+            # channel-multiplex check (needs calibrated measurements): result byte 0x42E68AF3
+            uc.hook_add(UC_HOOK_CODE, lambda u, a, sz, d: u.mem_write(0x42E68AF3, b""), None, 0x4005141C, 0x4005141C)
+            # 150 MHz bandwidth-limit check (same calibrated measurement): result byte 0x42E68B1F
+            uc.hook_add(UC_HOOK_CODE, lambda u, a, sz, d: u.mem_write(0x42E68B1F, b""), None, 0x400514D8, 0x400514D8)
+        # A shipped unit has finished the factory flow: its saved state (0x42E68AE0, loaded from the
+        # SPI-flash settings) holds 0x5A5555A5, so the POST and the "insert the tester" steps are
+        # skipped. Our flash starts blank; factory_done reproduces the shipped state at the check.
+        if factory_done:
+            uc.hook_add(UC_HOOK_CODE, lambda u, a, sz, d: u.mem_write(0x42E68AE0, (0x5A5555A5).to_bytes(4, "little")),
+                        None, 0x40051CF0, 0x40051CF0)
         self.syms = load_symbols()
         self._sym_addrs = [a for a, _ in self.syms]
 
