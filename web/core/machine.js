@@ -123,6 +123,28 @@ export class Machine {
       }
       ret(cpu);
     };
+    // halfword fill / copy loops (memset16 0x400356F4, copy_u16 0x40035728): same final registers,
+    // flags and memory as the loops, done natively (they are ~16 % of the UI loop's instructions)
+    const fill16 = (cpu) => {
+      const dst = cpu.r[0] >>> 0, v = cpu.r[1] & 0xFFFF, n = cpu.r[2] >>> 0;
+      const o = (dst - 0x40000000) >>> 0;
+      if (n && !(dst & 1) && o + 2 * n <= DRAM_SIZE) { cpu.d16.fill(v, o >> 1, (o >> 1) + n); cpu.invalidate(dst, 2 * n); }
+      else for (let i = 0; i < n; i++) cpu.st16(dst + 2 * i, v);
+      cpu.r[0] = (dst + 2 * n) | 0; cpu.r[2] = 0; cpu.N = 0; cpu.Z = 1; cpu.C = 1; cpu.V = 0;
+      ret(cpu);
+    };
+    const copy16 = (cpu) => {
+      const dst = cpu.r[0] >>> 0, src = cpu.r[1] >>> 0, n = cpu.r[2] >>> 0;
+      const od = (dst - 0x40000000) >>> 0, os = (src - 0x40000000) >>> 0;
+      let last = cpu.r[3];
+      if (n && !((dst | src) & 1) && od + 2 * n <= DRAM_SIZE && os + 2 * n <= DRAM_SIZE && (od >= os + 2 * n || os >= od + 2 * n || od <= os)) {
+        cpu.d16.copyWithin(od >> 1, os >> 1, (os >> 1) + n); last = cpu.d16[(od >> 1) + n - 1]; cpu.invalidate(dst, 2 * n);
+      } else for (let i = 0; i < n; i++) { last = cpu.ld16(src + 2 * i); cpu.st16(dst + 2 * i, last); }
+      cpu.r[0] = (dst + 2 * n) | 0; cpu.r[1] = (src + 2 * n) | 0; cpu.r[2] = 0; cpu.r[3] = last; cpu.N = 0; cpu.Z = 1; cpu.C = 1; cpu.V = 0;
+      ret(cpu);
+    };
+    c.hooks.set(0x400356F4, fill16);
+    c.hooks.set(0x40035728, copy16);
     c.hooks.set(0x40049700, gt(false));
     c.hooks.set(0x40049688, gt(true));
     // POST checks that need calibrated measurements (only reached when the factory flow runs)
@@ -144,21 +166,27 @@ export class Machine {
       c.pc = RESET;
       this.started = true;
     }
+    // Runs up to the next device event (timer expiry, capture done), so interrupts arrive on time
+    // (a 1 ms timer is 48k instructions). onSlice is called every `chunk` instructions.
     const end = c.insns + maxInsns;
+    let nextSlice = c.insns + chunk;
     while (c.insns < end && !this.error) {
+      const step = Math.max(1, Math.min(end - c.insns, nextSlice - c.insns, this.dev.nextEvent()));
+      const before = c.insns;
       try {
-        c.run(chunk);
+        c.run(step);
       } catch (e) {
         if (e instanceof Fault) { this.error = `${e.message}`; break; }
         throw e;
       }
-      if (c.insns % 1000000 < chunk) {
+      const ran = c.insns - before;
+      if (Math.floor(c.insns / 1000000) !== Math.floor(before / 1000000)) {
         const k = `${this.sym(c.pc)}  <- ${this.sym(c.r[14] >>> 0)}`;
         this.hot.set(k, (this.hot.get(k) || 0) + 1);
       }
-      this.dev.tick(chunk);
+      this.dev.tick(ran);
       if (this.dev.gic.hasPending() && !c.I) { c.irq(); this.irqs++; }
-      if (onSlice && onSlice(this)) break;
+      if (c.insns >= nextSlice) { nextSlice = c.insns + chunk; if (onSlice && onSlice(this)) break; }
     }
     return { insns: c.insns, error: this.error };
   }

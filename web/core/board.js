@@ -82,7 +82,8 @@ export class Board {
     }
     if (addr >= 0x01C0F000 && addr < 0x01C10000) { this.mmc0.write(addr - 0x01C0F000, size, value); return true; }
     if (addr >= 0x01C68000 && addr < 0x01C69000) { this.spi0.write(addr - 0x01C68000, size, value); return true; }
-    if ((addr >= CCU && addr < CCU + 0x400) || (addr >= TMR && addr < TMR + 0x100)) return true;
+    if (addr >= TMR && addr < TMR + 0x100) { this.m.cpu.stop = true; return true; }   // timer reprogrammed: re-plan the next event
+    if (addr >= CCU && addr < CCU + 0x400) return true;
     for (let i = 0; i < 3; i++) {
       const base = UART[i];
       if (addr >= base && addr < base + 0x100) {
@@ -101,10 +102,21 @@ export class Board {
   }
 
   tick(n) {                                      // n instructions elapsed
-    const t = Math.max(1, Math.floor(n * this.ticksPerInsn));
+    this.tickFrac = (this.tickFrac || 0) + n * this.ticksPerInsn;
+    const t = Math.floor(this.tickFrac);
+    this.tickFrac -= t;
     this.ticks += t;
-    this.timers.advance(t);
+    if (t) this.timers.advance(t);
     this.csi.advance(n);
+  }
+
+  // instructions until the next device event (timer expiry, capture done); Infinity if none
+  nextEvent() {
+    let n = Infinity;
+    const tk = this.timers.ticksToNext();
+    if (tk < Infinity) n = Math.max(1, Math.ceil((tk - (this.tickFrac || 0)) / this.ticksPerInsn));
+    if (this.csi.armed > 0) n = Math.min(n, this.csi.armed);
+    return n;
   }
 
   uartText() {
@@ -364,6 +376,15 @@ export class Gic {                               // GIC-400 subset
 
 export class Timers {                            // timer 0/1: 24 MHz down-counters -> IRQ 50/51
   constructor(m, gic) { this.m = m; this.gic = gic; this.acc = [0, 0]; }
+  ticksToNext() {
+    let n = Infinity;
+    for (let k = 0; k < 2; k++) {
+      if (!(this.m.r32(TMR + 0x10 + 16 * k) & 1)) continue;
+      const intv = (this.m.r32(TMR + 0x14 + 16 * k) >>> 0) || 1;
+      n = Math.min(n, Math.max(1, intv - this.acc[k]));
+    }
+    return n;
+  }
   advance(ticks) {
     const en = this.m.r32(TMR);
     for (let n = 0; n < 2; n++) {
@@ -381,20 +402,25 @@ export class Timers {                            // timer 0/1: 24 MHz down-count
 }
 
 export class Csi {                               // CSI0: FPGA sample stream -> 8 slots x 6144 samples
-  static BASE = 0x01CB4000; static IRQ = 0x74;
+  static BASE = 0x01CB4000; static IRQ = 0x74; static RING = 0x42DF76D4;
   constructor(m, gic, signal) { this.m = m; this.gic = gic; this.signal = signal; this.status = 0; this.frames = 0; this.armed = 0; }
   read(off) { return off === 0x74 ? this.status : undefined; }
   write(off, v) {
     if (off === 0x74) { this.status &= ~v; return true; }
-    if (off === 0x08 && (v & 3)) this.armed = 20000;
+    if (off === 0x08 && (v & 3)) { this.armed = 20000; this.m.cpu.stop = true; }   // end the run step: the event loop re-plans
     return false;
   }
   advance(insns) {
     if (this.armed <= 0) return;
     this.armed -= insns;
     if (this.armed > 0) return;
+    // One capture fills one bank (0x1800 bytes) at BUF0. The firmware steps BUF0 through the 8
+    // banks of the ring 0x42DF76D4 + bank * 0x2134 (STATIC/RUNTIME-CONFIRMED: BUF0 seen at bank 7).
     const buf = (this.m.r32(Csi.BASE + 0x50) << 2) >>> 0;
-    if (buf >= 0x40000000 && buf < 0x44000000) for (let slot = 0; slot < 8; slot++) this.m.writeBytes(buf + slot * 0x2134, this.signal.samples(slot, this.frames));
+    if (buf >= 0x40000000 && buf < 0x44000000) {
+      const d = buf - Csi.RING, bank = d >= 0 && d % 0x2134 === 0 && d / 0x2134 < 8 ? d / 0x2134 : 0;
+      this.m.writeBytes(buf, this.signal.samples(bank, this.frames));
+    }
     this.frames++;
     this.status |= 2;
     this.gic.raise(Csi.IRQ);
@@ -409,10 +435,21 @@ export class FrontEnd {
   // trace and the measurements follow the firmware's own settings. ASSUMPTIONS: the V/div table
   // below, 8 vertical divisions, all lanes sampling the same instant.
   static SYS = 0x40544E68;
+  // time/div by index SYS+0x588 (41 = 20 s/div ... 12 = 5 ns/div; DERIVED: 22 = 10 us, 23 = 20 us,
+  // 24 = 50 us seen when picking them in the HOR menu, which lists them in this order)
+  static TDIV = (() => {
+    const menu = [20, 10, 5, 2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001, 5e-4, 2e-4, 1e-4, 5e-5, 2e-5, 1e-5, 5e-6, 2e-6, 1e-6, 5e-7, 2e-7, 1e-7, 5e-8, 2e-8, 1e-8, 5e-9];
+    const t = []; menu.forEach((v, pos) => { t[41 - pos] = v; }); return t;
+  })();
+  // The display takes 50 samples per pixel, 95 px per division (DERIVED from the drawn period and the
+  // firmware's own frequency reading at 20 us/div), so the capture rate the FPGA must deliver is
+  // 4750 samples per division (237.5 MS/s at 20 us/div; the label says 250 MS/s).
+  static SAMPLES_PER_DIV = 4750;
+  static MAX_RATE = 0.95e9;          // the label tops out at 1 GS/s; same 0.95 factor (ASSUMPTION, checked at 2 us/div)
   static VDIV = [20, 10, 5, 2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002];   // DERIVED: index 6 shows 200mV, 5 shows 500mV
   constructor(m) {
     this.m = m;
-    this.SAMPLE_RATE = 250e6;                    // total sample rate, all 8 interleaved lanes (ASSUMPTION: the 250 MS/s shown at 20 us/div)
+    this.rate = 237.5e6;                         // capture rate, all 8 interleaved lanes (follows the time base)
     this.LANES = 8;
     this.ch = [
       { on: true, wave: 'sine', freq: 1000, vpp: 2, offset: 0, probe: 1, source: 'gen' },
@@ -468,18 +505,29 @@ export class FrontEnd {
     // The 8 lanes are interleaved ADC phases: byte i of lane L is sample 8*i + L. The FPGA triggers
     // the capture: the rising crossing of the generator's mean level sits at the middle of the
     // frame (ASSUMPTION: 50 % pre-trigger, generator phase 0 = trigger).
-    const dt = 1 / this.SAMPLE_RATE, mid = (n * this.LANES) / 2;
+    // one channel: 8 interleaved lanes; two channels: lanes 0..3 CH1, 4..7 CH2, 4 per channel
+    // (conversion calls seen: lane 0..3 with channel 0, lane 4..7 with channel 1)
+    const both = on[0] && on[1];
+    const lanes = both ? this.LANES / 2 : this.LANES, lane = both ? slot & 3 : slot;
+    const tdiv = FrontEnd.TDIV[this.u(0x588, 1)] || 2e-5;
+    this.rate = Math.min(FrontEnd.SAMPLES_PER_DIV / tdiv, FrontEnd.MAX_RATE);
+    const dt = this.LANES / lanes / this.rate;   // per-channel rate halves with two channels
+    // The firmware converts the first N samples of each lane, N*8 = (10 divisions of samples) + ~1604
+    // (seen: 6138 at 20 us, 2576 at 2 us, 794 at 500 ns, 438 at 200 ns per lane); the trigger sits in
+    // the middle of that record.
+    const record = Math.min((n - 6) * lanes, (10 * tdiv / dt) + 1604 * lanes / this.LANES);
+    const mid = record / 2;
     this.halfSpan = mid * dt;
     const phase0 = p.wave === 'sine' ? 0 : p.wave === 'saw' ? 0.5 : p.wave === 'triangle' ? 0.75 : 0;
     for (let i = 0; i < n; i++) {
       let code;
-      const idx = i * this.LANES + slot;
+      const idx = i * lanes + lane;
       const t = (idx - mid) * dt + phase0 / Math.max(p.freq, 1e-9);
       if (d44 >= 3000) code = Math.floor((d44 - 3000) * 256 / 7000);          // POST ADC test: the swept DAC drives the codes
       else if (ip > 0) {
-        const px = offPx + this.volts(p, t, n * this.LANES - idx) * k;
+        const px = offPx + this.volts(p, t, n * lanes - idx) * k;
         code = base + (px * unit * Math.pow(2, shift) - B) / ip;
-      } else code = 128 + this.volts(p, t, n * this.LANES - idx) * k / 2.5;      // no usable calibration
+      } else code = 128 + this.volts(p, t, n * lanes - idx) * k / 2.5;      // no usable calibration
       code = Math.round(code);
       out[i] = code < 0 ? 0 : code > 255 ? 255 : code;
     }
@@ -501,12 +549,12 @@ export class Gt911 {                             // Goodix GT911 touch, register
       this.down = true; this.x = Math.max(0, x | 0); this.y = Math.max(0, y | 0);
       this.releaseWanted = false;
     } else {
-      this.releaseWanted = true;                 // keep a quick click until the firmware has read it twice
-      if (this.downReads >= 2) { this.down = false; this.releasePending = true; }
+      this.releaseWanted = true;                 // keep a quick click until the firmware has read it once
+      if (this.downReads >= 1) { this.down = false; this.releasePending = true; }
     }
   }
   refresh() {
-    if (this.down && this.releaseWanted && this.downReads >= 2) { this.down = false; this.releasePending = true; }
+    if (this.down && this.releaseWanted && this.downReads >= 1) { this.down = false; this.releasePending = true; }
     if (this.down) {
       this.downReads++;
       const r = this.regs;

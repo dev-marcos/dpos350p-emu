@@ -587,8 +587,10 @@ class Csi:
             return
         buf = self.sim.r32(self.BASE + 0x50) << 2            # BUF0 holds address / 4 (0x10B7DDB5 -> 0x42DF76D4)
         if 0x40000000 <= buf < 0x44000000:
-            for slot in range(8):
-                self.sim.uc.mem_write(buf + slot * 0x2134, self.signal(slot, self.frames))
+            # one capture fills one bank; the firmware steps BUF0 through the 8 banks of the ring
+            d = buf - 0x42DF76D4
+            bank = d // 0x2134 if d >= 0 and d % 0x2134 == 0 and d // 0x2134 < 8 else 0
+            self.sim.uc.mem_write(buf, self.signal(bank, self.frames))
         self.frames += 1
         self.status |= 2                               # frame done
         if self.sim.r32(self.BASE + 0x70) & 2 or True:

@@ -60,11 +60,15 @@ repository). It stays as the reference for the JavaScript port.
   at 0x1FB000. Without it the firmware's conversion yields a constant (flat trace, -796 mV). The
   front end produces the ADC codes that this calibration converts into the wanted screen position, so
   amplitudes and measurements follow the V/div setting (checked: 1 Vpp sine reads VPP 1 V, RMS 352 mV).
-- OPEN: the drawn time axis spans about 21 % less than 12 x time/div, while the firmware's frequency
-  measurement agrees with the 250 MS/s generator (20 kHz reads 19 kHz).
-- OPEN: the CH2 "Channel enable" switch does not toggle with emulated touches yet.
+- Time base: the generator follows the selected time/div (SYS+0x588) at 4750 samples per division,
+  up to 0.95 GS/s, with the trigger in the middle of the record the firmware converts. Checked from
+  1 ms to 500 ns/div: period and trigger position exact, frequency reading exact. Below 1 us/div the
+  trace drifts by up to 10 px.
+- Both channels work: lanes 0..3 feed CH1 and 4..7 feed CH2, with half the rate per channel.
 - The volts → ADC code conversion is an assumption until the front-end gain chain is
   reverse-engineered.
+- Interrupts arrive on time: the run loop stops at the next timer expiry or capture end.
+  Before this fix the 1 ms tick lost about 9 of 10 interrupts and the UI read the touch panel only every ~2 s.
 - Emulated time runs at 0.5 oscillator tick per instruction, about 48 M instructions per emulated
   second. The speed selector can hold the emulator to real time.
 - Not modelled: USB, sound.
