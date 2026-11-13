@@ -40,7 +40,7 @@ def load_symbols():
 
 
 class Sim:
-    def __init__(self, image, trace_mmio=False, sd_image=None):
+    def __init__(self, image, trace_mmio=False, sd_image=None, bypass_calibration=False):
         self.sd_image = sd_image if sd_image is not None else bytearray(64 << 20)   # blank 64 MiB card
         uc = Uc(UC_ARCH_ARM, UC_MODE_ARM)
         try:
@@ -62,8 +62,51 @@ class Sim:
         uc.hook_add(UC_HOOK_MEM_READ, self._mmio_read, None, MMIO, MMIO + MMIO_SIZE - 1)
         uc.hook_add(UC_HOOK_MEM_WRITE, self._mmio_write, None, MMIO, MMIO + MMIO_SIZE - 1)
         uc.hook_add(UC_HOOK_MEM_UNMAPPED, self._unmapped)
+        # cache maintenance has no effect without modelled caches; skip the set/way loops
+        from unicorn import UC_HOOK_CODE
+        for a in (0x4006A550,):                       # clean+invalidate D-cache by set/way
+            uc.hook_add(UC_HOOK_CODE, self._ret, None, a, a)
+        # Fast paths (same effect as the stock routines, without emulating every PIO access):
+        # the bit-banged FPGA bus primitives and the timer-polling delays.
+        fast = {0x4004927C: "fpga_cmd", 0x40049214: "fpga_wr", 0x400491B8: "fpga_rd",
+                0x40042D0C: "delay_us", 0x40042CF0: "delay_ms",
+                0x40049700: "gt911_rd", 0x40049688: "gt911_wr"}
+        for a, kind in fast.items():
+            uc.hook_add(UC_HOOK_CODE, self._fast, kind, a, a)
+        # Emulator shortcut (OPEN: replace with a front-end model good enough for the FFT-based
+        # system calibration): where the POST tests the calibration result (0x400513DC,
+        # byte 0x42E68B01), report success so the boot continues to the main screen.
+        self.bypass_calibration = bypass_calibration
+        if bypass_calibration:
+            uc.hook_add(UC_HOOK_CODE, lambda u, a, sz, d: u.mem_write(0x42E68B01, b""), None, 0x400513DC, 0x400513DC)
         self.syms = load_symbols()
         self._sym_addrs = [a for a, _ in self.syms]
+
+    def _fast(self, uc, addr, size, kind):
+        r0 = uc.reg_read(R.UC_ARM_REG_R0)
+        f = self.dev.fpga
+        if kind == "fpga_cmd":
+            f.command(r0 & 0xFF)
+        elif kind == "fpga_wr":
+            f.write(r0 & 0xFF)
+        elif kind == "fpga_rd":
+            uc.reg_write(R.UC_ARM_REG_R0, f.read())
+        elif kind in ("gt911_rd", "gt911_wr"):          # (reg, addr_len, buf, len)
+            reg = r0 if uc.reg_read(R.UC_ARM_REG_R1) == 2 else r0 & 0xFF
+            buf, n = uc.reg_read(R.UC_ARM_REG_R2), uc.reg_read(R.UC_ARM_REG_R3)
+            if 0 < n < 0x1000:
+                if kind == "gt911_rd":
+                    uc.mem_write(buf, self.dev.touch.read(reg, n))
+                else:
+                    self.dev.touch.write(reg, bytes(uc.mem_read(buf, n)))
+        elif kind == "delay_us":
+            self.dev.tick_us(r0)
+        elif kind == "delay_ms":
+            self.dev.tick_us(r0 * 1000)
+        uc.reg_write(R.UC_ARM_REG_PC, uc.reg_read(R.UC_ARM_REG_LR))
+
+    def _ret(self, uc, addr, size, user):
+        uc.reg_write(R.UC_ARM_REG_PC, uc.reg_read(R.UC_ARM_REG_LR))
 
     # ---------------------------------------------------------------- helpers
     def r32(self, a): return struct.unpack("<I", bytes(self.uc.mem_read(a, 4)))[0]
@@ -105,25 +148,46 @@ class Sim:
         return False
 
     # ---------------------------------------------------------------- run
-    def boot(self, max_insns, chunk=1_000_000):
+    def boot(self, max_insns, chunk=500_000, on_slice=None):
+        """Run in slices; between slices advance device time and deliver pending IRQs."""
         uc = self.uc
-        uc.reg_write(R.UC_ARM_REG_CPSR, 0x1D3)          # SVC, IRQ/FIQ masked, ARM
-        pc = RESET
-        hot = collections.Counter()
+        if not getattr(self, "started", False):
+            uc.reg_write(R.UC_ARM_REG_CPSR, 0x1D3)      # SVC, IRQ/FIQ masked, ARM
+            self.next_pc = RESET
+            self.started = True
+            self.hot = collections.Counter()
         t0 = time.time()
         err = None
-        while self.insns < max_insns:
+        end = self.insns + max_insns
+        while self.insns < end:
             try:
-                uc.emu_start(pc, 0xFFFFFFFF, count=chunk)
+                uc.emu_start(self.next_pc, 0xFFFFFFFF, count=chunk)
             except UcError as e:
                 err = f"{e} at {self.sym(self.pc())}"
                 break
             self.insns += chunk
-            pc = self.pc() | (1 if uc.reg_read(R.UC_ARM_REG_CPSR) & 0x20 else 0)
-            hot[f"{self.sym(self.pc())}  <- {self.sym(uc.reg_read(R.UC_ARM_REG_LR))}"] += 1
+            cpsr = uc.reg_read(R.UC_ARM_REG_CPSR)
+            self.next_pc = self.pc() | (1 if cpsr & 0x20 else 0)
+            if self.insns % 1_000_000 < chunk:
+                self.hot[f"{self.sym(self.pc())}  <- {self.sym(uc.reg_read(R.UC_ARM_REG_LR))}"] += 1
             self.dev.tick(chunk)
+            if self.dev.gic.has_pending() and not cpsr & 0x80:
+                self._irq(cpsr)
+            if on_slice and on_slice(self):
+                break
         dt = time.time() - t0
-        return {"insns": self.insns, "seconds": dt, "pc": self.sym(self.pc()), "error": err, "hot": hot}
+        return {"insns": self.insns, "seconds": dt, "pc": self.sym(self.pc()), "error": err, "hot": self.hot}
+
+    def _irq(self, cpsr):
+        """ARM IRQ exception entry: SPSR_irq = CPSR, LR_irq = return + 4, IRQ mode, I set,
+        ARM state, PC = low vector 0x18 (SCTLR.V = 0; Reset_Handler copied the vectors to 0)."""
+        uc = self.uc
+        ret = self.pc()
+        uc.reg_write(R.UC_ARM_REG_CPSR, (cpsr & ~0x3F) | 0x12 | 0x80)
+        uc.reg_write(R.UC_ARM_REG_SPSR, cpsr)
+        uc.reg_write(R.UC_ARM_REG_LR, ret + 4)
+        self.next_pc = 0x18
+        self.irqs = getattr(self, "irqs", 0) + 1
 
 
 def main():
@@ -183,3 +247,64 @@ def screenshot(sim, path):
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# ---------------------------------------------------------------- snapshots
+def _detach(obj, seen=None):
+    """Replace back-references to the Sim (attribute 'sim') with None; return what was cut."""
+    cut = []
+    stack = [obj]
+    seen = set()
+    while stack:
+        o = stack.pop()
+        if id(o) in seen or not hasattr(o, "__dict__"):
+            continue
+        seen.add(id(o))
+        for k, v in list(vars(o).items()):
+            if k == "sim":
+                cut.append((o, v))
+                setattr(o, k, None)
+            elif hasattr(v, "__dict__") and not isinstance(v, type) and not hasattr(v, "__func__") and type(v).__name__ != "function":
+                stack.append(v)
+    return cut
+
+
+def save_snapshot(sim, path):
+    import pickle, zlib
+    uc = sim.uc
+    regions = [(a, s) for a, s in ((DRAM, DRAM_SIZE), (SRAM, SRAM_SIZE), (HIVEC, 0x10000), (MMIO, MMIO_SIZE))]
+    mem = [(a, zlib.compress(bytes(uc.mem_read(a, s)), 1)) for a, s in regions]
+    ctx = uc.context_save()
+    cut = _detach(sim.dev)
+    try:
+        dev = pickle.dumps(sim.dev)
+    finally:
+        for o, v in cut:
+            o.sim = v
+    state = {"mem": mem, "ctx": pickle.dumps(ctx), "dev": dev, "insns": sim.insns, "next_pc": sim.next_pc,
+             "irqs": getattr(sim, "irqs", 0)}
+    Path(path).write_bytes(pickle.dumps(state))
+
+
+def load_snapshot(sim, path):
+    import pickle, zlib
+    st = pickle.loads(Path(path).read_bytes())
+    for a, z in st["mem"]:
+        sim.uc.mem_write(a, zlib.decompress(z))
+    sim.uc.context_restore(pickle.loads(st["ctx"]))
+    sd = sim.dev.sd.img                       # keep the current SD image object
+    dev = pickle.loads(st["dev"])
+    stack, seen = [dev], set()
+    while stack:                              # re-attach the Sim
+        o = stack.pop()
+        if id(o) in seen or not hasattr(o, "__dict__"):
+            continue
+        seen.add(id(o))
+        for k, v in list(vars(o).items()):
+            if k == "sim":
+                setattr(o, k, sim)
+            elif hasattr(v, "__dict__") and not isinstance(v, type) and not hasattr(v, "__func__") and type(v).__name__ != "function":
+                stack.append(v)
+    sim.dev = dev
+    sim.insns, sim.next_pc, sim.irqs, sim.started = st["insns"], st["next_pc"], st["irqs"], True
+    sim.hot = collections.Counter()

@@ -17,9 +17,18 @@ class Board:
         self.mmc0 = Mmc(self.sd, sim)
         self.fpga = Fpga()
         self.pe_dat = 0
+        self.gic = Gic()
+        self.timers = Timers(sim, self.gic)
+        self.touch = Gt911()
+        self.frontend = FrontEnd(sim)
+        self.csi = Csi(sim, self.gic, self.frontend)
 
     # returns the value to read, or None (unmodelled: RAM-backed, logged)
     def read(self, addr, size):
+        if 0x01C81000 <= addr < 0x01C83000:
+            return self.gic.read(addr)
+        if Csi.BASE <= addr < Csi.BASE + 0x1000:
+            return self.csi.read(addr - Csi.BASE)
         if addr == PE_DAT and size == 4:
             mode = (self.pe_dat >> 2) & 3
             v = self.pe_dat
@@ -52,6 +61,13 @@ class Board:
         return None
 
     def write(self, addr, size, value):
+        if 0x01C81000 <= addr < 0x01C83000:
+            return self.gic.write(addr, value)
+        if Csi.BASE <= addr < Csi.BASE + 0x1000:
+            return self.csi.write(addr - Csi.BASE, value)
+        if TMR <= addr < TMR + 0x100 and addr == TMR + 4:     # timer IRQ status: write 1 to clear
+            self.sim.uc.mem_write(addr, (self.sim.r32(addr) & ~value).to_bytes(4, "little"))
+            return True
         if addr == PE_DAT and size == 4:
             old, self.pe_dat = self.pe_dat, value
             if old & 1 and not value & 1:                        # PE0 falling edge
@@ -78,8 +94,19 @@ class Board:
                 return True
         return False
 
+    def tick_us(self, us):
+        """A delay routine was skipped: let device time pass (24 ticks per microsecond)."""
+        t = (us & 0xFFFFFFFF) * 24
+        self.ticks += t
+        self.timers.advance(t)
+        self.csi.advance(us * 1000)
+
     def tick(self, n):
-        self.ticks += n
+        """n instructions elapsed. Assumption: ~1e9 instructions/s, OSC 24 MHz -> 0.024 tick per insn."""
+        t = max(1, n * 24 // 1000)
+        self.ticks += t
+        self.timers.advance(t)
+        self.csi.advance(n)
 
     def uart_text(self):
         return "\n".join(f"[uart{i}] " + b.decode("latin1") for i, b in enumerate(self.uart) if b)
@@ -424,6 +451,8 @@ class Fpga:
         if s == 0x01:                         # identity: A5 A5 5A 5A (checked by the ID probe)
             v = (0xA5, 0xA5, 0x5A, 0x5A)[self.idx % 4]
             self.idx += 1
+        elif s == 0x0A:                       # acquisition status: bit 0 = complete (Hack FPGA_PROTOCOL)
+            v = 0x01
         elif s == 0x60:                       # security-chip status (POST check reads bit 0)
             v = 0x01
         elif s in (0x64, 0x65):               # job state / completion: ready (bit 0)
@@ -438,3 +467,177 @@ class Fpga:
 
 
 PE_DAT = 0x01C208A0
+
+
+class Gic:
+    """GIC-400 subset: per-IRQ enable (GICD 0x1100/0x1180) and IAR/EOIR (GICC 0x0C/0x10)."""
+    DIST, CPU = 0x01C81000, 0x01C82000
+
+    def __init__(self):
+        self.enabled = set()
+        self.pending = set()
+        self.active = []
+        self.counts = {}
+
+    def raise_irq(self, n):
+        self.pending.add(n)
+
+    def has_pending(self):
+        return bool(self.pending & self.enabled)
+
+    def read(self, addr):
+        if addr == self.CPU + 0x0C:                    # IAR
+            ready = sorted(self.pending & self.enabled)
+            if not ready:
+                return 1023
+            n = ready[0]
+            self.pending.discard(n)
+            self.active.append(n)
+            self.counts[n] = self.counts.get(n, 0) + 1
+            return n
+        if self.DIST + 0x100 <= addr < self.DIST + 0x120:
+            k = (addr - self.DIST - 0x100) // 4
+            return sum(1 << b for b in range(32) if 32 * k + b in self.enabled)
+        return None
+
+    def write(self, addr, v):
+        if self.DIST + 0x100 <= addr < self.DIST + 0x120:
+            k = (addr - self.DIST - 0x100) // 4
+            self.enabled |= {32 * k + b for b in range(32) if v >> b & 1}
+            return True
+        if self.DIST + 0x180 <= addr < self.DIST + 0x1A0:
+            k = (addr - self.DIST - 0x180) // 4
+            self.enabled -= {32 * k + b for b in range(32) if v >> b & 1}
+            return True
+        if addr == self.CPU + 0x10:                    # EOIR
+            if v & 0x3FF in self.active:
+                self.active.remove(v & 0x3FF)
+            return True
+        return False
+
+
+class Timers:
+    """Timer 0/1 at 0x01C20C00: 24 MHz down-counters raising IRQ 50/51."""
+    def __init__(self, sim, gic):
+        self.sim, self.gic = sim, gic
+        self.acc = [0, 0]
+
+    def advance(self, ticks):
+        en = self.sim.r32(TMR)
+        for n in (0, 1):
+            ctrl = self.sim.r32(TMR + 0x10 + 16 * n)
+            intv = self.sim.r32(TMR + 0x14 + 16 * n) or 1
+            if not ctrl & 1:
+                continue
+            self.acc[n] += ticks
+            if self.acc[n] >= intv:
+                self.acc[n] %= intv
+                self.sim.w32(TMR + 4, self.sim.r32(TMR + 4) | (1 << n))
+                if en >> n & 1:
+                    self.gic.raise_irq(50 + n)
+
+
+class Csi:
+    """CSI0 at 0x01CB4000 receiving the FPGA sample stream (layout: Hack FPGA.md section 40):
+    8 slots of 6144 8-bit samples, slot stride 0x2134, from the address in BUF0 (+0x50).
+    A capture start produces one frame from the virtual signal and raises IRQ 116 (0x74)."""
+    BASE, IRQ = 0x01CB4000, 0x74
+
+    def __init__(self, sim, gic, signal):
+        self.sim, self.gic, self.signal = sim, gic, signal
+        self.status = 0
+        self.frames = 0
+        self.armed = 0
+        self.writes = []
+
+    def read(self, off):
+        if off == 0x74:
+            return self.status
+        return None
+
+    def write(self, off, v):
+        if off == 0x74:                                # status: write 1 to clear
+            self.status &= ~v
+            return True
+        self.writes.append((off, v))
+        if off == 0x08 and v & 3:                      # CAP: single (bit 0) or video (bit 1) capture
+            self.armed = 20000                         # frame arrives a little later
+        return False
+
+    def advance(self, insns):
+        if self.armed <= 0:
+            return
+        self.armed -= insns
+        if self.armed > 0:
+            return
+        buf = self.sim.r32(self.BASE + 0x50) << 2            # BUF0 holds address / 4 (0x10B7DDB5 -> 0x42DF76D4)
+        if 0x40000000 <= buf < 0x44000000:
+            for slot in range(8):
+                self.sim.uc.mem_write(buf + slot * 0x2134, self.signal(slot, self.frames))
+        self.frames += 1
+        self.status |= 2                               # frame done
+        if self.sim.r32(self.BASE + 0x70) & 2 or True:
+            self.gic.raise_irq(self.IRQ)
+
+
+class FrontEnd:
+    """Virtual analog front end + probe. ADC code = offset from the DC-offset DAC (SYS_INFO+0x44:
+    the POST ADC test sweeps it 3000..~10000 and expects the codes to ramp through every bit)
+    plus the probe signal (a sine; amplitude in codes)."""
+    def __init__(self, sim, amplitude=50, period=512):
+        self.sim, self.amplitude, self.period = sim, amplitude, period
+        import math
+        self.wave = [math.sin(2 * math.pi * i / period) for i in range(6144)]
+
+    def __call__(self, slot, frame, n=6144):
+        dac = int.from_bytes(self.sim.uc.mem_read(0x40544E68 + 0x44, 2), "little")
+        base = (dac - 3000) * 256 // 7000
+        a = self.amplitude
+        return bytes(max(0, min(255, base + int(a * self.wave[i]))) for i in range(n))
+
+
+class Gt911:
+    """Goodix GT911 touch controller, register level (reached through the fast-path hooks on
+    gt911_read_regs / gt911_write_regs). One touch point; coordinates in display pixels.
+    ASSUMPTION: panel axes equal display axes (no rotation/mirroring)."""
+    def __init__(self):
+        self.regs = bytearray(0x10000)
+        self.regs[0x8140:0x8144] = b"911\0"
+        self.regs[0x8146:0x814A] = (1024).to_bytes(2, "little") + (600).to_bytes(2, "little")
+        self.down = False
+        self.x = self.y = 0
+        self.release_pending = False
+        self.track = 0
+        self.reads = 0
+
+    def event(self, kind, x, y):
+        if kind in ("down", "move"):
+            if kind == "down":
+                self.track = (self.track + 1) & 0x0F
+            self.down, self.x, self.y = True, max(0, x), max(0, y)
+        else:
+            self.down = False
+            self.release_pending = True
+
+    def _refresh(self):
+        if self.down:
+            self.regs[0x814E] = 0x81                       # buffer ready, 1 point
+            self.regs[0x814F] = self.track
+            self.regs[0x8150:0x8152] = self.x.to_bytes(2, "little")
+            self.regs[0x8152:0x8154] = self.y.to_bytes(2, "little")
+            self.regs[0x8154:0x8156] = (30).to_bytes(2, "little")
+        elif self.release_pending:
+            self.regs[0x814E] = 0x80                       # buffer ready, no point: release
+            self.release_pending = False
+        elif self.regs[0x814E] & 0x80 == 0:
+            pass
+
+    def read(self, reg, n):
+        self.reads += 1
+        if reg <= 0x814E < reg + n:
+            self._refresh()
+        return bytes(self.regs[(reg + i) & 0xFFFF] for i in range(n))
+
+    def write(self, reg, data):
+        for i, b in enumerate(data):
+            self.regs[(reg + i) & 0xFFFF] = b
